@@ -83,8 +83,27 @@ El token de instalación de la GitHub App (caduca a la hora) se pide en cada fet
 **Pipeline interno:**
 1. Trocear y comprimir el diff para no pasarse del límite de tokens (técnica de PR-Agent).
 2. Linters y SAST: eslint, ruff, semgrep, gitleaks, ast-grep… Sus resultados se pasan como pistas al modelo.
-3. Agente revisor (LLM) con herramientas de shell dentro del sandbox (grep, cat, ast-grep) para buscar contexto fuera del diff.
+3. Agente revisor (LLM) con herramientas de solo lectura dentro del sandbox (grep, read_file, ast-grep) para buscar contexto fuera del diff. El bucle es propio (ver más abajo).
 4. Agente verificador: confirma o descarta cada hallazgo y le pone una puntuación de confianza. Se filtra lo que no llega al umbral (patrón del plugin code-review de Anthropic).
+
+**Cómo usa el LLM (bucle de agente propio):**
+
+Dentro del contenedor no hay ningún servidor de LLM. Se ejecuta nuestro programa (`apps/reviewer`), que es el cliente: llama por HTTP a la API del proveedor y ejecuta en local las herramientas que pida el modelo.
+
+```
+/repo (worktree, ro)   /in/input.json (ReviewerInput)   /out/findings.json (Finding[])
+
+por cada trozo del diff:
+  ┌─► LLM {system, trozo, pistas de linters, tools: grep | read_file | ast_grep}
+  │     ◄── tool_call
+  │   el revisor la ejecuta en el sandbox (solo lectura sobre /repo)
+  └── devuelve el resultado al modelo
+  … hasta la salida estructurada Finding[] o el máximo de pasos
+```
+
+- El bucle de herramientas lo da el AI SDK. Nosotros definimos las herramientas y el prompt.
+- El modelo solo **pide** herramientas, y únicamente existen las que definimos: todas de solo lectura, sin escritura ni ejecución arbitraria.
+- Descartado por ahora: usar un agente ya hecho dentro del contenedor (Codex app-server, opencode o Claude Agent SDK). Son más pesados, traen herramientas de escritura que habría que desactivar, la salida no es nuestro formato y algunos tiran hacia su propio proveedor.
 
 **Seguridad:**
 - El código del PR no es de fiar: la config de un linter puede ser JS ejecutable y puede haber prompt injection.
@@ -206,4 +225,5 @@ Entre procesos, el desacople ya lo dan la cola, los ficheros montados y `@otter/
 
 - Las opciones exactas de Graphile Worker (`jobKey`, `jobKeyMode: "replace"`, eliminar trabajos por clave) en la versión actual.
 - La ubicación actual del plugin code-review de Anthropic.
+- Gateway de LLM (LiteLLM o similar) como servicio aparte: sacaría la API key del revisor y permitiría dejarlo en una red interna sin internet. Pendiente de decidir.
 - El socket de Docker en el worker equivale a ser root en el host. Valorar un proxy del socket que solo permita crear y borrar contenedores.
