@@ -4,6 +4,7 @@ CREATE TABLE repos (
   id           bigserial PRIMARY KEY,
   owner        text NOT NULL,
   name         text NOT NULL,
+  installation_id bigint NOT NULL,
   mirror_path  text,
   last_used_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (owner, name)

@@ -1,13 +1,22 @@
-import { createServer } from "node:http";
+import { serve } from "@hono/node-server";
+import { runMigrations } from "graphile-worker";
+import pg from "pg";
+import { createApp } from "./app.js";
+import { loadConfig } from "./config.js";
+import { enqueueReview } from "./queue/enqueue-review.js";
 
-const port = Number(process.env.PORT ?? 3000);
+const config = loadConfig(process.env);
 
-createServer((req, res) => {
-  if (req.method === "GET" && req.url === "/health") {
-    res.writeHead(200).end("ok");
-  } else if (req.url === "/webhook" || req.url?.startsWith("/admin")) {
-    res.writeHead(501).end("not implemented");
-  } else {
-    res.writeHead(404).end();
-  }
-}).listen(port, () => console.log(`api listening on :${port}`));
+// So graphile_worker.add_job exists even if the worker has not started yet.
+await runMigrations({ connectionString: config.databaseUrl });
+
+const pool = new pg.Pool({ connectionString: config.databaseUrl });
+
+const app = createApp({
+  webhookSecret: config.webhookSecret,
+  enqueueReview: (job, delaySeconds) => enqueueReview(pool, job, delaySeconds),
+});
+
+serve({ fetch: app.fetch, port: config.port }, ({ port }) =>
+  console.log(`api listening on :${port}`),
+);

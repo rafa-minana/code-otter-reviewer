@@ -15,12 +15,16 @@ services:
   api:
     build: { context: ., args: { APP: api } }
     env_file: [{ path: .env, required: false }]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgres://otter:${POSTGRES_PASSWORD:-otter}@postgres:5432/otter}
     ports: ["3000:3000"]
     depends_on: { postgres: { condition: service_healthy } }
 
   worker:
     build: { context: ., args: { APP: worker } }
     env_file: [{ path: .env, required: false }]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgres://otter:${POSTGRES_PASSWORD:-otter}@postgres:5432/otter}
     user: root # needs the Docker socket; see ARCHITECTURE.md §13 (socket proxy)
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock

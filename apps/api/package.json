@@ -4,6 +4,17 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "dependencies": { "@otter/contracts": "*" },
-  "scripts": { "build": "tsc -b" }
+  "dependencies": {
+    "@hono/node-server": "2.1.5",
+    "@otter/contracts": "*",
+    "graphile-worker": "0.18.0",
+    "hono": "4.13.13",
+    "pg": "8.23.1"
+  },
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "devDependencies": {
+    "@types/pg": "8.23.1"
+  }
 }

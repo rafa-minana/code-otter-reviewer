@@ -46,7 +46,19 @@ Graphile Worker es una librería de Node que usa tablas de Postgres como cola de
 - **Push durante una revisión:** se deja terminar, y antes de publicar se compara el SHA revisado con el último del PR. Si ya no es el último, la revisión se descarta, porque habrá otra encolada.
 - **Idempotencia:** GitHub puede reenviar eventos. Cada `(PR, SHA)` se revisa una sola vez.
 - **Reintentos:** automáticos, con espera exponencial (lo hace Graphile Worker).
-- **Encolado transaccional:** el estado del PR y el trabajo se guardan en la misma transacción.
+- **Encolado transaccional:** el estado del PR y el trabajo se guardan en la misma transacción, mediante `graphile_worker.add_job(..., job_key, job_key_mode => 'replace')` en SQL. La api ejecuta las migraciones de graphile al arrancar, así que puede encolar aunque el worker no haya arrancado.
+
+**Respuestas de `POST /webhook`** (Hono, `apps/api`):
+
+| Entrada | Respuesta |
+|---|---|
+| Firma `X-Hub-Signature-256` ausente o inválida | 401, no se toca la BD |
+| Cuerpo de más de 25 MB | 413 |
+| `ping` | 200 |
+| `pull_request` `opened` / `reopened` / `synchronize` | 202. Se encola la revisión (espera de 0 / 0 / 120 s) |
+| Otro evento o acción | 204, se ignora |
+| JSON inválido o payload sin los campos esperados | 400 |
+| Fallo de la BD | 500, GitHub reintenta la entrega |
 
 ## 4. Git: un mirror por repo y un worktree por PR
 
@@ -223,7 +235,7 @@ Entre procesos, el desacople ya lo dan la cola, los ficheros montados y `@otter/
 
 ## 13. Pendiente de verificar
 
-- Las opciones exactas de Graphile Worker (`jobKey`, `jobKeyMode: "replace"`, eliminar trabajos por clave) en la versión actual.
+- ~~Las opciones de Graphile Worker `jobKey` y `replace`~~: verificado en la 0.18.0. `add_job` tiene `job_key_mode` y su valor por defecto es `replace`. Falta verificar cómo se eliminan trabajos por clave (v3).
 - La ubicación actual del plugin code-review de Anthropic.
 - Gateway de LLM (LiteLLM o similar) como servicio aparte: sacaría la API key del revisor y permitiría dejarlo en una red interna sin internet. Pendiente de decidir.
 - El socket de Docker en el worker equivale a ser root en el host. Valorar un proxy del socket que solo permita crear y borrar contenedores.
