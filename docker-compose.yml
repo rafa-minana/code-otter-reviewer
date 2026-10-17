@@ -1,0 +1,37 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: otter
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-otter}
+      POSTGRES_DB: otter
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "otter"]
+      interval: 5s
+
+  api:
+    build: { context: ., args: { APP: api } }
+    env_file: [{ path: .env, required: false }]
+    ports: ["3000:3000"]
+    depends_on: { postgres: { condition: service_healthy } }
+
+  worker:
+    build: { context: ., args: { APP: worker } }
+    env_file: [{ path: .env, required: false }]
+    user: root # needs the Docker socket; see ARCHITECTURE.md §13 (socket proxy)
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/otter:/var/otter # same path as on the host: reviewers are sibling containers
+    depends_on: { postgres: { condition: service_healthy } }
+
+  # Image only, launched by the worker per review: docker compose build reviewer
+  reviewer:
+    build: { context: ., args: { APP: reviewer } }
+    image: code-otter-reviewer
+    profiles: ["build-only"]
+
+volumes:
+  pgdata:
