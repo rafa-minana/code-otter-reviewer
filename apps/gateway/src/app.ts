@@ -132,6 +132,10 @@ export function createGateway(deps: GatewayDeps): Hono {
 
   return new Hono()
     .get("/healthz", (c) => c.text("ok", HTTP_STATUS.ok))
+    .get("/review", (c) => {
+      const grant = verifyReviewToken(config.secret, provider.readToken(c.req.raw.headers), now());
+      return c.json({ reviewId: grant!.reviewId });
+    })
     .post(
       "*",
       bodyLimit({
