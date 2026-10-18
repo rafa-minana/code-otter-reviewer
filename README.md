@@ -31,7 +31,7 @@ In plain words:
 5. **A second AI pass double-checks each finding** and scores it from 0 to 10. Only the ones scoring 7 or more get posted, so you get less noise.
 6. **It posts one review** on your pull request. Each commit is reviewed only once.
 
-Everything runs in Docker: an `api`, a `worker` and a `postgres` database.
+Everything runs in Docker: an `api`, a `worker` and a `postgres` database. Each review runs in its own short-lived, locked-down container: it can read the PR's code but can't touch your GitHub token, your database or anything else.
 
 ---
 
@@ -202,9 +202,12 @@ npx smee-client -u https://smee.io/xxxx -t http://localhost:3000/webhook
 ```
 
 ```bash
-# Terminal 2: starts everything
+# Terminal 2: build the reviewer image, then start everything
+docker compose build reviewer
 docker compose up --build
 ```
+
+> 💡 Each review runs in its own throwaway container from the `code-otter-reviewer` image. Compose doesn't build it on `up`, so run `docker compose build reviewer` the first time and after every update. If you forget, the worker refuses to start and tells you so.
 
 You're ready when you see `api listening on :3000` and `Worker connected and looking for jobs`.
 
@@ -302,7 +305,7 @@ Same as locally, with two differences:
 
 The worker keeps a copy of each repo and a checkout of each open PR in `/var/otter` (on macOS it lives inside Docker's VM: peek with `docker compose exec worker ls /var/otter`). Make sure the server has disk for your repos. A PR's checkout is deleted when the PR is closed.
 
-Heads-up: the worker also mounts `/var/run/docker.sock` for the sandboxed reviewer coming next. **It isn't used yet.** Access to the Docker socket is effectively root on the host, so keep that in mind on a shared server.
+Heads-up: the worker mounts `/var/run/docker.sock` to launch a sandboxed container for each review (no GitHub token, read-only code, no privileges). Access to the Docker socket is effectively root on the host, so keep that in mind on a shared server.
 
 ---
 
@@ -338,6 +341,7 @@ Coming next: a sandbox with linters and repo-aware tools (v1), then incremental 
 | The api or worker can't connect to Postgres | `POSTGRES_PASSWORD` was changed after the database was created, or `DATABASE_URL` was set by hand. See the warning in step 4 |
 | Nothing reaches the api | Is the smee client running, and is the App's **Webhook URL** right? The App's **Advanced** → **Recent Deliveries** page shows every delivery and lets you resend it |
 | Webhooks arrive but nothing gets reviewed | Is the App installed on that repo, with the permissions from step 2? A commit that was already reviewed won't be reviewed again |
+| The worker won't start: `reviewer image "code-otter-reviewer" not found` | Build it: `docker compose build reviewer` (needed once, and after every update) |
 | `invalid .otter.yaml` in the logs | The `.otter.yaml` on the base branch has a typo or an unknown field |
 
 ---

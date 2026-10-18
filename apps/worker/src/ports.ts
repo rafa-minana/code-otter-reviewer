@@ -1,4 +1,4 @@
-import type { Finding, ReviewerInput, ReviewJob } from "@otter/contracts";
+import type { Finding, ReviewerRequest, ReviewJob } from "@otter/contracts";
 
 // Only vendor-facing I/O gets a port: these are what tests fake and what may be swapped.
 
@@ -30,10 +30,13 @@ export interface GitHubClient {
 }
 
 export interface ContainerRunner {
-  /** Raw findings.json: the container ran untrusted code, so the core validates it. */
+  /**
+   * Runs one review in a throwaway container over the read-only checkout at `worktree`.
+   * Returns its raw output: the container touched untrusted code, so the core validates it.
+   */
   runReviewer(
-    job: ReviewJob,
+    request: ReviewerRequest,
     worktree: string,
-    input: ReviewerInput,
+    name: string,
   ): Promise<unknown>;
 }

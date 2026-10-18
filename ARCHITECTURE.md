@@ -89,7 +89,10 @@ El token de instalación de la GitHub App (caduca a la hora) se pide en cada rev
 
 ## 5. Contenedor revisor
 
-- **Ciclo de vida:** `docker run --rm` en cada revisión, para usar siempre la última imagen sin arrastrar estado viejo.
+- **Ciclo de vida:** `docker run --rm` en cada revisión, para usar siempre la última imagen sin arrastrar estado viejo. Lo lanza el worker con el CLI de Docker (`worker/runner.ts`), por el socket montado; se llama `otter-review-<id de la review>`.
+- **Aislamiento (hecho en v1, plan 3):** `--read-only` + `/tmp` en tmpfs, `--cap-drop ALL`, `no-new-privileges`, usuario sin privilegios, límites de memoria, CPU, procesos y 15 min de tiempo, y `--pull never`: la imagen se construye en local (`docker compose build reviewer`) y nunca se descarga de un registro. El worktree se monta en `/repo` en solo lectura; nada más del host.
+- **Entorno:** solo las variables `LLM_*` de una lista cerrada (`REVIEWER_LLM_ENV`), pasadas por nombre (`-e LLM_API_KEY`), así que sus valores no aparecen en los argumentos. Nunca el token de GitHub ni la URL de la base de datos.
+- **Preparado para el gateway (plan 6):** la red es `REVIEWER_NETWORK` (por defecto `bridge`, con internet). Con el gateway, esa red pasa a ser interna, `LLM_BASE_URL` apunta al gateway y `LLM_API_KEY` sale de la lista.
 - **Volumen del PR:** lo que se quiere reutilizar entre revisiones (estado, índices) vive en este volumen, no en el contenedor.
 - **Caché de dependencias por repo:** con la clave en el hash del lockfile.
 
@@ -99,7 +102,9 @@ El token de instalación de la GitHub App (caduca a la hora) se pide en cada rev
 - la config `.otter.yaml` **de la rama base**, para que un PR no pueda cambiar su propia revisión: `ignore` (rutas a ignorar), `instructions` (instrucciones por ruta) y `language` (`en` por defecto, o `es`), que es el idioma del resumen y de los comentarios;
 - los hallazgos ya publicados, para no repetirlos.
 
-**Salida:** `findings.json` con `{path, startLine?, line, side, severity, body, suggestion?, confidence?}`. `startLine`–`line` es el rango de líneas del hallazgo, como en el `/review` de PR-Agent; sin `startLine` es una sola línea.
+**Entrada y salida por stdin/stdout** (en vez de ficheros en `/in` y `/out`: sin directorios compartidos, sin problemas de permisos y sin nada en disco): el worker escribe un `ReviewerRequest {input, finalAttempt}` en el stdin y lee un `ReviewerOutput` del stdout. Los logs del revisor van a stderr. **El worker valida esa salida con zod** (`parseReviewerOutput` en `worker/core.ts`: tipos, líneas positivas, tamaños máximos, como mucho 50 hallazgos) antes de que llegue a GitHub o a la BD, porque el contenedor ha estado en contacto con código no fiable.
+
+**Salida:** `ReviewerOutput` con el resumen, el riesgo y los hallazgos `{path, startLine?, line, side, severity, body, suggestion?, confidence?}`. `startLine`–`line` es el rango de líneas del hallazgo, como en el `/review` de PR-Agent; sin `startLine` es una sola línea.
 
 **Pipeline interno:**
 1. Compactar el diff dentro del presupuesto de tokens (ver "Compactación del diff").
@@ -179,7 +184,7 @@ PR-Agent, en cambio, les asigna un 7 por defecto y publica todos.
 Dentro del contenedor no hay ningún servidor de LLM. Se ejecuta nuestro programa (`apps/reviewer`), que es el cliente: llama por HTTP a la API del proveedor y ejecuta en local las herramientas que pida el modelo.
 
 ```
-/repo (worktree, ro)   /in/input.json (ReviewerInput)   /out/findings.json (Finding[])
+/repo (worktree, ro)   stdin: ReviewerRequest   stdout: ReviewerOutput
 
 por cada trozo del diff:
   ┌─► LLM {system, trozo, pistas de linters, tools: grep | read_file | ast_grep}
@@ -309,7 +314,8 @@ Entre procesos, el desacople ya lo dan la cola, los ficheros montados y `@otter/
 1. **v0:** webhook → diff por la API → LLM → verificador → review con comentarios inline. Sin sandbox. Compactación: pasos 1, 2, 4, 5 y 6, sin contexto dinámico.
 2. **v1:** mirror + worktree + contenedor revisor + linters + agente con herramientas de solo lectura + contexto dinámico (paso 3).
    - ✅ Plan 1: mirror + worktree, diff de git (sin el límite de la API), contexto dinámico, limpieza al cerrar el PR.
-   - Pendiente: contenedor revisor, agente con herramientas, linters y SAST, red restringida.
+   - ✅ Plan 3: contenedor revisor aislado (stdin/stdout, salida validada, solo variables `LLM_*`).
+   - Pendiente: agente con herramientas, linters y SAST, red restringida y gateway.
 3. **v2:** revisión incremental completa, endpoints admin, barrendero, comandos `@otter`.
 
 ## 13. Pendiente de verificar
@@ -317,4 +323,4 @@ Entre procesos, el desacople ya lo dan la cola, los ficheros montados y `@otter/
 - ~~Las opciones de Graphile Worker `jobKey` y `replace`~~: verificado en la 0.18.0. `add_job` tiene `job_key_mode` y su valor por defecto es `replace`. Falta verificar cómo se eliminan trabajos por clave (v2).
 - La ubicación actual del plugin code-review de Anthropic.
 - Gateway de LLM (LiteLLM o similar) como servicio aparte: sacaría la API key del revisor y permitiría dejarlo en una red interna sin internet. Pendiente de decidir.
-- El socket de Docker en el worker equivale a ser root en el host. Valorar un proxy del socket que solo permita crear y borrar contenedores.
+- **El socket de Docker en el worker equivale a ser root en el host** (decisión del plan 3: se deja y se documenta). Quien controla el worker puede crear contenedores que monten el disco del host. Un proxy del socket limita qué llamadas se hacen, pero no evita eso. La mitigación de verdad es un plan propio: Docker rootless, gVisor (`runsc`) o Podman sin root.

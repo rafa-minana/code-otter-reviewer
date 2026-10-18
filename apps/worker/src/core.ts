@@ -1,5 +1,6 @@
-import type { Finding } from "@otter/contracts";
+import type { Finding, ReviewerOutput } from "@otter/contracts";
 import { parseDiff } from "@otter/reviewer/diff.js";
+import { z } from "zod";
 
 // Pure business rules: no I/O imports allowed here.
 
@@ -54,4 +55,47 @@ export function selectPublishable(
 /** True when the PR moved on while we were reviewing: discard, another review is queued. */
 export function isStale(reviewedSha: string, headSha: string): boolean {
   return reviewedSha !== headSha;
+}
+
+// Bounds for what a reviewer container may hand back: it touched untrusted code, so its output is untrusted too.
+const MAX_FINDINGS = 50;
+const MAX_TEXT_CHARS = 10_000; // a summary, a comment body or a suggestion
+const MAX_PATH_CHARS = 1_000;
+const MAX_LISTED_PATHS = 10_000;
+
+const path = z.string().min(1).max(MAX_PATH_CHARS);
+const text = z.string().max(MAX_TEXT_CHARS);
+const lineNumber = z.number().int().positive();
+
+const reviewerOutputSchema = z.object({
+  summary: text,
+  risk: z.enum(["low", "medium", "high"]),
+  language: z.enum(["en", "es"]),
+  findings: z
+    .array(
+      z.object({
+        path,
+        startLine: lineNumber.optional(),
+        line: lineNumber,
+        side: z.enum(["LEFT", "RIGHT"]),
+        severity: z.enum(["critical", "major", "minor", "nit"]),
+        body: text,
+        suggestion: text.optional(),
+        confidence: z.number().min(0).max(1).optional(),
+      }),
+    )
+    .max(MAX_FINDINGS),
+  notReviewed: z.array(path).max(MAX_LISTED_PATHS),
+  filtered: z.array(path).max(MAX_LISTED_PATHS),
+  deleted: z.array(path).max(MAX_LISTED_PATHS),
+}); // z.object strips unknown fields
+
+/** The reviewer container's output, checked before anything reaches GitHub or the database. */
+export function parseReviewerOutput(raw: unknown): ReviewerOutput {
+  const parsed = reviewerOutputSchema.safeParse(raw);
+  if (!parsed.success)
+    throw new Error(
+      `invalid reviewer output: ${z.prettifyError(parsed.error)}`,
+    );
+  return parsed.data;
 }

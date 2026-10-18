@@ -1,15 +1,13 @@
 import type { Finding, ReviewJob } from "@otter/contracts";
-import { review } from "@otter/reviewer/agent.js";
-import type { LlmProvider } from "@otter/reviewer/llm.js";
 import type { JobHelpers } from "graphile-worker";
 import { parse as parseYaml } from "yaml";
-import { findingKey, isStale } from "./core.js";
+import { findingKey, isStale, parseReviewerOutput } from "./core.js";
 import { prDiff } from "./git/diff.js";
 import { withRepoLock } from "./git/lock.js";
 import { ensureMirror, fetchPr } from "./git/mirror.js";
 import type { GitEnv } from "./git/run.js";
 import { addWorktree } from "./git/worktree.js";
-import type { GitHubClient } from "./ports.js";
+import type { ContainerRunner, GitHubClient } from "./ports.js";
 import { publishReview } from "./publish.js";
 
 const CONFIG_PATH = ".otter.yaml";
@@ -49,14 +47,14 @@ type Result = "published" | "stale" | "failed";
 
 /**
  * Review job handler: the only place that orchestrates (ARCHITECTURE.md §1).
- * The engine still runs in-process (the reviewer container is v1 plan 3), over the PR's checkout.
+ * The review itself runs in the reviewer container (runner.ts), never in this process.
  */
 export async function handleReview(
-  deps: { gh: GitHubClient; llm: LlmProvider; git: GitEnv },
+  deps: { gh: GitHubClient; runner: ContainerRunner; git: GitEnv },
   job: ReviewJob,
   helpers: JobHelpers,
 ): Promise<void> {
-  const { gh, llm } = deps;
+  const { gh, runner } = deps;
   const reviewId = await helpers.withPgClient(
     async (pg) =>
       (
@@ -103,17 +101,19 @@ export async function handleReview(
       await gh.installationToken(job),
       helpers,
     );
-    const output = await review(
-      llm,
-      {
-        title: pr.title,
-        description: pr.body,
-        diff,
-        repoDir: worktree,
-        config: parseConfig(rawConfig),
-        previousFindings: [],
-      },
-      { finalAttempt },
+    const input = {
+      title: pr.title,
+      description: pr.body,
+      diff,
+      config: parseConfig(rawConfig),
+      previousFindings: [],
+    };
+    const output = parseReviewerOutput(
+      await runner.runReviewer(
+        { input, finalAttempt },
+        worktree,
+        `otter-review-${reviewId}`,
+      ),
     );
 
     if (isStale(job.sha, (await gh.getPullRequest(job)).headSha))

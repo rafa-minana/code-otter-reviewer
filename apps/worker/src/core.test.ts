@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { diffLines, isStale, selectPublishable } from "./core.js";
+import { diffLines, isStale, parseReviewerOutput, selectPublishable } from "./core.js";
 import { DIFF, finding } from "./fixtures.js";
 
 test("diffLines: context and + lines on the new side, across hunks; - lines are not commentable", () => {
@@ -41,4 +41,37 @@ test("selectPublishable keeps ranges fully on the diff and falls back to the las
 test("isStale when the head moved", () => {
   assert.equal(isStale("a", "a"), false);
   assert.equal(isStale("a", "b"), true);
+});
+
+const validOutput = () => ({
+  summary: "Adds login.",
+  risk: "high",
+  language: "es",
+  findings: [{ path: "a.ts", startLine: 1, line: 2, side: "RIGHT", severity: "critical", body: "bug", confidence: 0.9 }],
+  notReviewed: [],
+  filtered: ["yarn.lock"],
+  deleted: [],
+});
+
+test("parseReviewerOutput accepts the reviewer's output and drops unknown fields", () => {
+  const parsed = parseReviewerOutput({ ...validOutput(), injected: "<script>" });
+  assert.deepEqual(parsed, validOutput());
+  assert.ok(!("injected" in parsed));
+});
+
+test("parseReviewerOutput rejects anything malformed or oversized from the container", () => {
+  const withFinding = (patch: object) => ({ ...validOutput(), findings: [{ ...validOutput().findings[0], ...patch }] });
+  for (const bad of [
+    null,
+    "not an object",
+    { ...validOutput(), risk: "catastrophic" },
+    withFinding({ line: 0 }),
+    withFinding({ line: 1.5 }),
+    withFinding({ severity: "blocker" }),
+    withFinding({ confidence: 7 }),
+    withFinding({ body: "x".repeat(10_001) }),
+    { ...validOutput(), findings: Array.from({ length: 51 }, () => validOutput().findings[0]) },
+  ]) {
+    assert.throws(() => parseReviewerOutput(bad), /invalid reviewer output/, JSON.stringify(bad)?.slice(0, 80));
+  }
 });

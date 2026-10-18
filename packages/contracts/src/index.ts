@@ -37,6 +37,12 @@ export interface ReviewerInput {
   previousFindings: Finding[];
 }
 
+/** The worker → reviewer container message, on its stdin. */
+export interface ReviewerRequest {
+  input: ReviewerInput;
+  finalAttempt: boolean; // on the last attempt a failing verifier degrades instead of throwing
+}
+
 /** What the reviewer hands back: findings plus what the published summary needs. */
 export interface ReviewerOutput {
   summary: string;
