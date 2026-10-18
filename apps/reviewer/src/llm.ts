@@ -4,6 +4,7 @@ import { createGoogle } from "@ai-sdk/google";
 import { createOpenAI } from "@ai-sdk/openai";
 import { generateText, Output, type LanguageModel } from "ai";
 import type { z } from "zod";
+import { LLM_REASONING_LEVELS, LLM_TIMEOUT_MS } from "./constants.js";
 
 export interface LlmProvider {
   /** One structured-output call: the result is already validated against `schema`. */
@@ -27,6 +28,14 @@ export function createLlm(
     );
   }
   if (!env.LLM_MODEL) throw new Error("LLM_MODEL is required");
+  // Reasoning models can think for minutes; "none" makes cheap/free ones usable.
+  const reasoning = (env.LLM_REASONING ||
+    "provider-default") as (typeof LLM_REASONING_LEVELS)[number];
+  if (!LLM_REASONING_LEVELS.includes(reasoning)) {
+    throw new Error(
+      `LLM_REASONING must be one of ${LLM_REASONING_LEVELS.join(", ")}; got "${reasoning}"`,
+    );
+  }
   const settings = {
     apiKey: env.LLM_API_KEY,
     baseURL: env.LLM_BASE_URL || undefined,
@@ -48,6 +57,8 @@ export function createLlm(
         model,
         instructions: system,
         prompt,
+        reasoning,
+        timeout: LLM_TIMEOUT_MS,
         output: Output.object({ schema }),
       });
       return output;

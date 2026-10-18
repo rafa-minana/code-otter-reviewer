@@ -17,46 +17,64 @@ const output = (o: Partial<ReviewerOutput> = {}): ReviewerOutput => ({
 });
 
 test("renderSummary: ready to merge only when there are no findings and nothing was left out", () => {
-  const ready = renderSummary(output());
-  assert.match(ready, /Risk: medium/);
+  const ready = renderSummary(output(), []);
   assert.match(ready, /Adds login\./);
-  assert.match(ready, /ready to merge/);
+  assert.match(ready, /> \[!TIP\]\n> No issues found\. This PR is ready to merge\./);
 
   const partial = renderSummary(
     output({ notReviewed: ["big.ts"], filtered: ["yarn.lock"] }),
+    [],
   );
   assert.doesNotMatch(partial, /ready to merge/);
-  assert.match(partial, /some files were not reviewed/);
+  assert.match(partial, /> \[!NOTE\]\n> No issues found in the reviewed files/);
   assert.match(partial, /Not reviewed.*\n- `big.ts`/);
   assert.match(partial, /Skipped by filter.*\n- `yarn.lock`/);
 
   assert.doesNotMatch(
-    renderSummary(output({ findings: [finding(2)] })),
+    renderSummary(output({ findings: [finding(2)] }), [finding(2)]),
     /ready to merge|not reviewed/,
   );
 });
 
-test("renderSummary and renderComment use the configured language", () => {
-  assert.match(
-    renderSummary(output({ language: "es", risk: "high" })),
-    /Riesgo: alto[\s\S]*listo para mergear/,
-  );
-  assert.match(renderComment(finding(2), "es"), /^\*\*Importante\*\*/);
+test("renderSummary shows the risk as a GitHub alert coloured by level", () => {
+  assert.match(renderSummary(output({ risk: "high" }), []), /> \[!CAUTION\]\n> \*\*Risk: high\*\*/);
+  assert.match(renderSummary(output({ risk: "medium" }), []), /> \[!WARNING\]\n> \*\*Risk: medium\*\*/);
+  assert.match(renderSummary(output({ risk: "low" }), []), /> \[!TIP\]\n> \*\*Risk: low\*\*/);
 });
 
-test("renderComment marks unverified findings and adds the suggestion as a code block", () => {
-  const verified = renderComment(
-    { ...finding(2), suggestion: "return null;" },
-    "en",
+test("renderSummary counts the published findings by severity, and has no table without them", () => {
+  const published = [
+    { ...finding(1), severity: "critical" as const },
+    finding(2),
+    finding(3),
+  ];
+  assert.match(
+    renderSummary(output({ findings: published }), published),
+    /\*\*Findings:\*\*\n\n\| Critical \| Major \| Minor \| Nit \|\n\|:-:\|:-:\|:-:\|:-:\|\n\| 1 \| 2 \| 0 \| 0 \|/,
   );
+  // Findings off the diff are not published, so they are not counted either.
+  assert.doesNotMatch(renderSummary(output({ findings: [finding(99)] }), []), /Findings:/);
+});
+
+test("renderSummary and renderComment use the configured language", () => {
+  assert.match(
+    renderSummary(output({ language: "es", risk: "high" }), []),
+    /Riesgo: alto[\s\S]*listo para mergear/,
+  );
+  assert.match(renderComment(finding(2), "es"), /^> \[!WARNING\]\n> \*\*Importante\*\*/);
+});
+
+test("renderComment: severity as a coloured alert, unverified tag, body and suggestion outside the alert", () => {
   assert.equal(
-    verified,
-    "**Major**\n\nbug\n\n**Suggestion:**\n```\nreturn null;\n```",
+    renderComment({ ...finding(2), suggestion: "return null;" }, "en"),
+    "> [!WARNING]\n> **Major**\n\nbug\n\n**Suggestion:**\n```\nreturn null;\n```",
   );
   assert.match(
-    renderComment({ ...finding(2), confidence: undefined }, "en"),
-    /^\*\*Major\*\* _\(unverified\)_/,
+    renderComment({ ...finding(2), severity: "critical", confidence: undefined }, "en"),
+    /^> \[!CAUTION\]\n> \*\*Critical\*\* _\(unverified\)_\n\nbug$/,
   );
+  assert.match(renderComment({ ...finding(2), severity: "minor" }, "en"), /^> \[!NOTE\]/);
+  assert.match(renderComment({ ...finding(2), severity: "nit" }, "en"), /^> \[!TIP\]/);
 });
 
 test("publishReview posts ONE review with only the publishable findings", async () => {
@@ -92,14 +110,15 @@ test("publishReview posts ONE review with only the publishable findings", async 
     [2, 22],
   );
   assert.equal(calls.length, 1);
+  assert.match(calls[0].body, /\| 0 \| 2 \| 0 \| 0 \|/); // the off-diff finding is not counted
   assert.deepEqual(calls[0].comments, [
-    { path: "a.ts", line: 2, side: "RIGHT", body: "**Major**\n\nbug" },
+    { path: "a.ts", line: 2, side: "RIGHT", body: "> [!WARNING]\n> **Major**\n\nbug" },
     {
       path: "a.ts",
       startLine: 20,
       line: 22,
       side: "RIGHT",
-      body: "**Major**\n\nrange",
+      body: "> [!WARNING]\n> **Major**\n\nrange",
     },
   ]);
 });

@@ -10,6 +10,21 @@ export const MAX_DESCRIPTION_CHARS = 4_000; // the description is untrusted: it 
 
 export const RISKS = ["low", "medium", "high"] as const;
 
+/** Per LLM call: a hung provider fails the attempt (and Graphile retries) instead of blocking the worker forever. */
+export const LLM_TIMEOUT_MS = 250_000;
+
+/** Values of LLM_REASONING, passed as the AI SDK's provider-agnostic `reasoning` option. */
+export const LLM_REASONING_LEVELS = [
+  "provider-default",
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] as const;
+
 /** `language` values accepted in .otter.yaml, and the name the model is told to write in. */
 export const LANGUAGES = { en: "English", es: "Spanish" } as const;
 
