@@ -4,13 +4,16 @@ import type { ReviewJob } from "@otter/contracts";
 import type { Config } from "./config.js";
 import type { GitHubClient } from "./ports.js";
 
-// TEMP(debug-raw): logs the real shape of the diff/raw responses to type them properly; remove afterwards.
-const debugRaw = (label: string, data: unknown) =>
-  console.log(
-    `[debug-raw] ${label}: typeof=${typeof data} constructor=${(data as object | null)?.constructor?.name}`,
-    `length=${(data as { length?: number } | null)?.length}`,
-    `start=${JSON.stringify(typeof data === "string" ? data.slice(0, 200) : data)?.slice(0, 300)}`,
-  );
+/**
+ * The "diff" and "raw" media types make GitHub answer plain text (observed: typeof string),
+ * but Octokit still types `data` as the JSON object. Check it instead of casting blindly.
+ */
+function asText(data: unknown, what: string): string {
+  if (typeof data !== "string") {
+    throw new Error(`GitHub returned ${typeof data} instead of text for ${what}`);
+  }
+  return data;
+}
 
 /** GitHub App auth (App ID + .pem → installation tokens). The only file that imports Octokit. */
 export function octokitClient({
@@ -54,8 +57,7 @@ export function octokitClient({
         ...pr(job),
         mediaType: { format: "diff" },
       });
-      debugRaw("getDiff", data);
-      return data as unknown as string; // the diff media type returns plain text
+      return asText(data, `the diff of ${job.owner}/${job.repo}#${job.number}`);
     },
 
     async getFile(job, path, ref) {
@@ -67,8 +69,7 @@ export function octokitClient({
           ref,
           mediaType: { format: "raw" },
         });
-        debugRaw(`getFile ${path}@${ref}`, data);
-        return data as unknown as string;
+        return asText(data, `${path}@${ref}`);
       } catch (err) {
         if ((err as { status?: number }).status === 404) return null;
         throw err;
