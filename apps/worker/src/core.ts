@@ -13,8 +13,8 @@ export function diffLines(diff: string): Set<string> {
   for (const file of parseDiff(diff)) {
     for (const hunk of file.hunks) {
       let line = hunk.newStart;
-      for (const l of hunk.lines)
-        if (l[0] !== "-") keys.add(key(file.path, "RIGHT", line++));
+      for (const diffLine of hunk.lines)
+        if (diffLine[0] !== "-") keys.add(key(file.path, "RIGHT", line++));
     }
   }
   return keys;
