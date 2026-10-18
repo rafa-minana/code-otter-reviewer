@@ -4,6 +4,15 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "dependencies": { "@otter/contracts": "*" },
-  "scripts": { "build": "tsc -b" }
+  "dependencies": {
+    "@ai-sdk/anthropic": "4.0.82",
+    "@ai-sdk/google": "4.0.99",
+    "@ai-sdk/openai": "4.0.96",
+    "@otter/contracts": "*",
+    "ai": "7.0.143",
+    "zod": "4.6.7"
+  },
+  "scripts": {
+    "build": "tsc -b"
+  }
 }

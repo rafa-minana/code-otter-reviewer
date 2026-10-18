@@ -8,7 +8,7 @@ export interface Finding {
   severity: Severity;
   body: string;
   suggestion?: string;
-  confidence: number; // 0..1, set by the verifier
+  confidence?: number; // 0..1, set by the verifier; absent = unverified
 }
 
 export interface ReviewJob {
@@ -28,9 +28,21 @@ export interface CleanupJob {
 
 /** What the worker hands the reviewer container. */
 export interface ReviewerInput {
+  title: string;
+  description: string;
   diff: string;
   config: unknown; // parsed .otter.yaml
   previousFindings: Finding[];
+}
+
+/** What the reviewer hands back: findings plus what the published summary needs. */
+export interface ReviewerOutput {
+  summary: string;
+  risk: "low" | "medium" | "high";
+  findings: Finding[];
+  notReviewed: string[]; // paths left out by the token budget
+  filtered: string[]; // paths skipped by .otter.yaml or default filters
+  deleted: string[]; // files deleted entirely
 }
 
 /** Graphile Worker task names: the api enqueues them, the worker registers them. */
