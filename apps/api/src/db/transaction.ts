@@ -17,3 +17,12 @@ export async function withTransaction(
     client.release();
   }
 }
+
+export async function countOpenPullRequests(pool: Pool): Promise<number> {
+  const client = await pool.connect();
+  const result = await client.query<{ count: string }>(
+    "SELECT count(*) AS count FROM pull_requests WHERE state = 'open'",
+  );
+  const count = Number(result.rows[0].count);
+  return count;
+}
