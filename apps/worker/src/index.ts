@@ -17,10 +17,10 @@ const deps = {
   git: config.git,
 };
 
-// shortcut: one review at a time (ARCHITECTURE.md §8 global limit); raise it with more replicas or an env var.
+// Global limit of simultaneous reviewers (ARCHITECTURE.md §8); extra jobs wait in the queue.
 await run({
   connectionString: config.databaseUrl,
-  concurrency: 1,
+  concurrency: config.concurrency,
   taskList: {
     [TASKS.review]: (payload, helpers) =>
       handleReview(deps, payload as ReviewJob, helpers),

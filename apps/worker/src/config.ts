@@ -7,6 +7,8 @@ const GITHUB_URL = "https://github.com";
 const DEFAULT_REVIEWER_IMAGE = "code-otter-reviewer";
 /** Docker's default network (internet access). Plan 6 swaps it for an internal one with the LLM gateway. */
 const DEFAULT_REVIEWER_NETWORK = "bridge";
+/** Simultaneous jobs; each review runs one reviewer container (up to 1 GB RAM, 1 CPU). */
+const DEFAULT_CONCURRENCY = 1;
 
 export interface ReviewerConfig {
   image: string;
@@ -17,6 +19,7 @@ export interface Config {
   databaseUrl: string;
   git: GitEnv;
   reviewer: ReviewerConfig;
+  concurrency: number;
   appId: string;
   privateKey: string;
 }
@@ -37,8 +40,16 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
       image: env.REVIEWER_IMAGE || DEFAULT_REVIEWER_IMAGE,
       network: env.REVIEWER_NETWORK || DEFAULT_REVIEWER_NETWORK,
     },
+    concurrency: parseConcurrency(env.WORKER_CONCURRENCY),
     appId: GITHUB_APP_ID,
     // .env files can't hold multi-line values everywhere, so accept "\n"-escaped PEMs
     privateKey: GITHUB_PRIVATE_KEY.replace(/\\n/g, "\n"),
   };
+}
+
+function parseConcurrency(value: string | undefined): number {
+  if (!value) return DEFAULT_CONCURRENCY;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1) throw new Error(`WORKER_CONCURRENCY must be a positive integer, got "${value}"`);
+  return n;
 }

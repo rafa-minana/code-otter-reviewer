@@ -232,7 +232,7 @@ Una sola función `cleanupPr()` (y `cleanupRepo()`), usada por el evento de cier
 - **Cierre del PR (hecho en v1, plan 1):** en una transacción, la api marca el PR como `closed`, quita su revisión pendiente (`graphile_worker.remove_job`) y encola `cleanup`. El worker, con el lock del repo, borra los worktrees y `refs/otter/pr<n>`. Las filas de la BD se quedan, porque borrarlas a mitad de una revisión haría fallar el `INSERT` de sus hallazgos; las borrará el barrendero.
 - **Barrendero (janitor):** trabajo periódico que borra los PRs sin actividad en 5 días y los repos sin actividad en N días. Si llega un push a un PR ya limpiado, se recrea todo, porque solo era caché.
 - **Recursos:** los contenedores son `--rm`, así que al terminar no queda RAM ocupada. Lo que se libera es disco.
-- **Límite de concurrencia:** un máximo global de revisores simultáneos (CPU y RAM).
+- **Límite de concurrencia:** un máximo global de revisores simultáneos (CPU y RAM): `WORKER_CONCURRENCY`, por defecto 1. Los jobs que no caben esperan en la cola.
 
 ## 9. Endpoints de administración
 
