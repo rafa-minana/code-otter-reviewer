@@ -41,6 +41,21 @@ function parseHunk(text: string): Hunk {
   };
 }
 
+/** "path:line" of every line the PR adds (new-side numbers): what the PR itself introduces. */
+export function addedLines(diff: string): Set<string> {
+  const added = new Set<string>();
+  for (const file of parseDiff(diff)) {
+    for (const hunk of file.hunks) {
+      let line = hunk.newStart;
+      for (const l of hunk.lines) {
+        if (l[0] === "+") added.add(`${file.path}:${line}`);
+        if (l[0] !== "-") line++;
+      }
+    }
+  }
+  return added;
+}
+
 /** Lines of a file in the PR's head, or null when it can't or mustn't be read. */
 export type ReadLines = (path: string) => string[] | null;
 

@@ -191,7 +191,7 @@ test("no reviewable files: no LLM calls, low risk", async () => {
 test("with a checkout, review and verify calls get the read-only repo tools; without one, none", async () => {
   const out = () => ({ summary: "s", risk: "low", findings: [f(2)] });
   const withRepo = fakeLlm(out);
-  await review(withRepo.llm, { ...input(fileDiff("a.ts")), repoDir: tmpdir() });
+  await review(withRepo.llm, { ...input(fileDiff("a.ts")), repoDir: tmpdir() }, { linters: async () => [] });
   assert.deepEqual(
     withRepo.calls.map((c) => [isVerify(c), Object.keys(c.tools ?? {}).sort()]),
     [
@@ -202,4 +202,13 @@ test("with a checkout, review and verify calls get the read-only repo tools; wit
   const withoutRepo = fakeLlm(out);
   await review(withoutRepo.llm, input(fileDiff("a.ts")));
   assert.ok(withoutRepo.calls.every((c) => c.tools === undefined));
+});
+
+test("linter hints reach the prompt of the chunk holding their file, and no other", async () => {
+  const { llm, calls } = fakeLlm(() => ({ summary: "s", risk: "low", findings: [] }));
+  const hint = (path: string) => ({ path, line: 2, source: "gitleaks", rule: "aws-access-token", message: "AWS key" });
+  await review(llm, { ...input(fileDiff("b.ts")), repoDir: tmpdir() }, { linters: async () => [hint("b.ts"), hint("c.ts")] });
+  const [prompt] = calls.filter((c) => !isVerify(c)).map((c) => c.prompt);
+  assert.match(prompt, /## Automated checks.*\n- b\.ts:2 gitleaks aws-access-token: AWS key\n/);
+  assert.doesNotMatch(prompt, /c\.ts/);
 });

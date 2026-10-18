@@ -52,6 +52,7 @@ ${TOOLS(TOOL_MAX_STEPS)}
 - Do not report style, formatting, naming or intentional design decisions.
 - Do not speculate about code you cannot see: look it up with the tools instead.
 - If the potential impact is high but you are unsure, report it and say exactly what remains to be confirmed.
+- "Automated checks" are hints from deterministic tools, not findings: report one only if it is real. A leaked secret is critical; never repeat its value.
 - Report at most ${maxFindings} findings, the most important first. Zero findings is a valid answer.
 
 # Each finding

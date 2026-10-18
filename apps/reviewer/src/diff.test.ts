@@ -5,7 +5,7 @@ import {
   CONTEXT_LINES_BEFORE,
   FUNCTION_HEADER_SEARCH_LINES,
 } from "./constants.js";
-import { chunkDiff, extendContext, parseDiff } from "./diff.js";
+import { addedLines, chunkDiff, extendContext, parseDiff } from "./diff.js";
 
 const fileDiff = (path: string, body: string) =>
   `diff --git a/${path} b/${path}\nindex 1..2 100644\n--- a/${path}\n+++ b/${path}\n${body}`;
@@ -179,4 +179,9 @@ test("chunkDiff applies dynamic context only when it gets readLines", () => {
   const diff = fileDiff("a.ts", "@@ -30 +30 @@\n-old\n+changed 30\n");
   assert.doesNotMatch(chunkDiff(diff, opts).chunks[0].text, /line 29/);
   assert.match(chunkDiff(diff, { ...opts, readLines: () => FILE }).chunks[0].text, /^29  line 29$/m);
+});
+
+test("addedLines: only the + lines, with their new-file numbers", () => {
+  assert.deepEqual([...addedLines(AUTH)], ["src/auth.ts:41", "src/auth.ts:42"]);
+  assert.deepEqual([...addedLines(DELETED)], []);
 });

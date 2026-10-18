@@ -24,3 +24,12 @@ export interface ChunkedDiff {
   deleted: string[];
   notReviewed: string[];
 }
+
+/** A deterministic tool's result on a line the PR adds: a hint for the model, not a finding. */
+export interface Hint {
+  path: string;
+  line: number;
+  source: string;
+  rule: string;
+  message: string;
+}

@@ -108,7 +108,13 @@ El token de instalación de la GitHub App (caduca a la hora) se pide en cada rev
 
 **Pipeline interno:**
 1. Compactar el diff dentro del presupuesto de tokens (ver "Compactación del diff").
-2. Linters y SAST: eslint, ruff, semgrep, gitleaks, ast-grep… Sus resultados se pasan como pistas al modelo.
+2. Linters (`apps/reviewer/src/linters.ts`): por ahora solo **gitleaks**, que es un binario fijado por checksum en la imagen y no ejecuta código del PR.
+   - Corre una vez sobre `/repo`, con `--redact` (el valor del secreto no llega al prompt) y un timeout de 60 s.
+   - Solo cuentan los resultados en líneas que el PR añade, hasta 20.
+   - Se pasan como pistas dentro de `<untrusted>` al trozo de su fichero; el modelo las confirma y redacta el hallazgo.
+   - Si falla, se registra en stderr y la revisión sigue sin pistas.
+   - Se respetan `.gitleaks.toml` y `.gitleaksignore` del repo (`shortcut:` un PR podría añadir un allowlist para su propio secreto).
+   - Descartados por ahora: semgrep, ruff y eslint (eslint ejecuta la config del repo y necesita `node_modules`).
 3. Agente revisor (LLM) con herramientas de solo lectura dentro del sandbox (`read_file`, `grep`, `find_files`) para buscar contexto fuera del diff. El verificador usa las mismas. El bucle es propio (ver más abajo).
 4. Agente verificador: confirma o descarta cada hallazgo y le pone una puntuación de confianza. Se filtra lo que no llega al umbral (patrón del plugin code-review de Anthropic).
 
@@ -328,7 +334,8 @@ Entre procesos, el desacople ya lo dan la cola, los ficheros montados y `@otter/
    - ✅ Plan 1: mirror + worktree, diff de git (sin el límite de la API), contexto dinámico, limpieza al cerrar el PR.
    - ✅ Plan 3: contenedor revisor aislado (stdin/stdout, salida validada, solo variables `LLM_*`).
    - ✅ Plan 4: agente con herramientas de solo lectura (`read_file`, `grep`, `find_files`) en el revisor y en el verificador. Sin git log/blame (haría falta montar el mirror) ni ast-grep.
-   - Pendiente: linters y SAST, red restringida y gateway.
+   - ✅ Plan 5: gitleaks como pista para el LLM (solo líneas añadidas, secretos tapados).
+   - Pendiente: red restringida y gateway.
 3. **v2:** revisión incremental completa, endpoints admin, barrendero, comandos `@otter`.
 
 ## 13. Pendiente de verificar

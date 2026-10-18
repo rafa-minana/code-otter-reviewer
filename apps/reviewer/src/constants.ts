@@ -23,6 +23,10 @@ export const FIND_MAX_RESULTS = 200;
 export const TOOL_LINE_MAX_CHARS = 300;
 export const GREP_TIMEOUT_MS = 10_000;
 
+/** Linters (ARCHITECTURE.md §5, step 2): hints for the model; a failing or slow one never fails the review. */
+export const LINTER_TIMEOUT_MS = 60_000;
+export const MAX_HINTS = 20;
+
 /** Values of LLM_REASONING, passed as the AI SDK's provider-agnostic `reasoning` option. */
 export const LLM_REASONING_LEVELS = [
   "provider-default",

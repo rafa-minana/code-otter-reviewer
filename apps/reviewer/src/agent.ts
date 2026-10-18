@@ -14,10 +14,11 @@ import {
 } from "./constants.js";
 import { chunkDiff, countTokens } from "./diff.js";
 import { repoFileReader } from "./files.js";
+import { runLinters } from "./linters.js";
 import type { LlmProvider } from "./llm.js";
 import { reviewSystemPrompt } from "./prompts/review.js";
 import { repoTools } from "./tools.js";
-import type { Chunk } from "./types.js";
+import type { Chunk, Hint } from "./types.js";
 import { filterByConfidence, verify } from "./verify.js";
 
 // .otter.yaml comes from the PR's repo: validate it, never trust its shape.
@@ -47,7 +48,7 @@ const reviewSchema = z.object({
 export async function review(
   llm: LlmProvider,
   input: ReviewerInput,
-  opts: { finalAttempt?: boolean } = {},
+  opts: { finalAttempt?: boolean; linters?: typeof runLinters } = {},
 ): Promise<ReviewerOutput> {
   const parsed = configSchema.safeParse(input.config ?? {});
   if (!parsed.success)
@@ -68,6 +69,7 @@ export async function review(
     readLines: input.repoDir ? repoFileReader(input.repoDir) : undefined,
   });
   const tools = input.repoDir ? repoTools(input.repoDir) : undefined;
+  const hints = input.repoDir ? await (opts.linters ?? runLinters)(input.repoDir, input.diff) : [];
   const context = [
     deleted.length ? `## Deleted files\n${deleted.join("\n")}` : "",
     filtered.length ? `## Skipped by filter\n${filtered.join("\n")}` : "",
@@ -85,7 +87,7 @@ export async function review(
           ),
           language,
         ),
-        prompt: `<untrusted>\n${header}\n\n${context}\n\n# Diff\n${chunk.text}\n</untrusted>`,
+        prompt: `<untrusted>\n${header}\n\n${context}${renderHints(hints, chunk)}\n\n# Diff\n${chunk.text}\n</untrusted>`,
         schema: reviewSchema,
         tools,
       });
@@ -148,4 +150,12 @@ async function verifyChunk(
       (f) => f.severity === "critical" || f.severity === "major",
     );
   }
+}
+
+/** The chunk's linter hints, inside <untrusted>: rule descriptions can come from the repo's own config. */
+function renderHints(hints: Hint[], chunk: Chunk): string {
+  const mine = hints.filter((h) => chunk.paths.includes(h.path));
+  if (!mine.length) return "";
+  const lines = mine.map((h) => `- ${h.path}:${h.line} ${h.source} ${h.rule}: ${h.message}`);
+  return `\n\n## Automated checks (hints: confirm before reporting)\n${lines.join("\n")}`;
 }
