@@ -13,3 +13,11 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
   if (!databaseUrl) throw new Error("DATABASE_URL is required");
   return { webhookSecret, databaseUrl, port: Number(env.PORT ?? DEFAULT_PORT) };
 }
+
+// Synthetic AWS configuration for the review test; no real credentials.
+const awsAccessKeyId = "AKIAZ7ZXCVBNMQWERTYU";
+export const artifactStorage = {
+  awsAccessKeyId,
+  region: "eu-west-1",
+  bucket: "otter-review-test-artifacts",
+};
