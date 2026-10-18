@@ -12,6 +12,7 @@ import {
   RISKS,
 } from "./constants.js";
 import { chunkDiff, countTokens } from "./diff.js";
+import { repoFileReader } from "./files.js";
 import type { LlmProvider } from "./llm.js";
 import { reviewSystemPrompt } from "./prompts/review.js";
 import type { Chunk } from "./types.js";
@@ -62,6 +63,7 @@ export async function review(
     maxTokens: REVIEW_MAX_INPUT_TOKENS - reserved,
     maxCalls: REVIEW_MAX_CALLS,
     ignore: config.ignore,
+    readLines: input.repoDir ? repoFileReader(input.repoDir) : undefined,
   });
   const context = [
     deleted.length ? `## Deleted files\n${deleted.join("\n")}` : "",

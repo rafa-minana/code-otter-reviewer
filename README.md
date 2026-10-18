@@ -17,7 +17,7 @@ flowchart LR
     PR["You open a<br/>pull request"] -->|webhook| API["api<br/>checks it really<br/>comes from GitHub"]
     API -->|queues the job| DB[("Postgres")]
     DB --> W["worker"]
-    W -->|"diff + .otter.yaml"| GH1["GitHub"]
+    W -->|"PR code + .otter.yaml"| GH1["GitHub"]
     W -->|"1. find issues<br/>2. double-check them"| LLM["Your LLM"]
     W -->|one review with<br/>inline comments| GH2["Your pull request"]
 ```
@@ -26,7 +26,7 @@ In plain words:
 
 1. **You open a pull request** (or push to one) and GitHub lets code-otter know.
 2. code-otter **queues the review**. If you push several times in a row, it waits 2 minutes and only reviews the latest commit, so it doesn't waste work.
-3. It **fetches the changes** and your repo's settings (`.otter.yaml`, optional).
+3. It **fetches the PR's code** into a local copy of the repo, works out what changed, and reads your repo's settings (`.otter.yaml`, optional). Each change comes with a bit of the code around it, up to the function it lives in, so the AI sees more than isolated lines.
 4. **A first AI pass looks for problems**, focusing on bugs and security in the lines the PR adds.
 5. **A second AI pass double-checks each finding** and scores it from 0 to 10. Only the ones scoring 7 or more get posted, so you get less noise.
 6. **It posts one review** on your pull request. Each commit is reviewed only once.
@@ -300,7 +300,9 @@ Same as locally, with two differences:
 - **No smee.** Point the App's **Webhook URL** at `https://your-domain/webhook`, with a reverse proxy that handles HTTPS (Caddy, nginx, Traefik…) in front of the api's port `3000`.
 - **Only expose `/webhook`.** The `/admin` endpoints aren't built yet, and when they arrive they should stay on a private network.
 
-Heads-up: the worker mounts `/var/run/docker.sock` and `/var/otter` for the sandboxed reviewer coming in v1. **v0 doesn't use them yet.** Access to the Docker socket is effectively root on the host, so keep that in mind on a shared server.
+The worker keeps a copy of each repo and a checkout of each open PR in `/var/otter` (on macOS it lives inside Docker's VM: peek with `docker compose exec worker ls /var/otter`). Make sure the server has disk for your repos. A PR's checkout is deleted when the PR is closed.
+
+Heads-up: the worker also mounts `/var/run/docker.sock` for the sandboxed reviewer coming next. **It isn't used yet.** Access to the Docker socket is effectively root on the host, so keep that in mind on a shared server.
 
 ---
 
@@ -318,7 +320,6 @@ Heads-up: the worker mounts `/var/run/docker.sock` and `/var/otter` for the sand
 
 - **No incremental reviews:** each new commit reviews the whole PR again, so earlier comments can repeat.
 - **Size budget:** about 32k tokens of changes per AI call, up to 3 calls per review. Files that don't fit are listed in the summary as *not reviewed*.
-- **Very large PRs** (over 300 files or about 20,000 lines) can't be reviewed, because GitHub's API won't return their diff.
 - **One review at a time** per worker. Each review gets up to 3 attempts, and each AI call times out after 3 minutes.
 - **Code suggestions are plain code blocks,** not GitHub's one-click *suggested changes*.
 - **Rare double post:** if the worker crashes right after posting a review but before saving it, the retry posts it again.

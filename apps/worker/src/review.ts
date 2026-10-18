@@ -4,6 +4,11 @@ import type { LlmProvider } from "@otter/reviewer/llm.js";
 import type { JobHelpers } from "graphile-worker";
 import { parse as parseYaml } from "yaml";
 import { findingKey, isStale } from "./core.js";
+import { prDiff } from "./git/diff.js";
+import { withRepoLock } from "./git/lock.js";
+import { ensureMirror, fetchPr } from "./git/mirror.js";
+import type { GitEnv } from "./git/run.js";
+import { addWorktree } from "./git/worktree.js";
 import type { GitHubClient } from "./ports.js";
 import { publishReview } from "./publish.js";
 
@@ -44,24 +49,43 @@ type Result = "published" | "stale" | "failed";
 
 /**
  * Review job handler: the only place that orchestrates (ARCHITECTURE.md §1).
- * v0: no container; the engine runs in-process over the diff from the GitHub API.
+ * The engine still runs in-process (the reviewer container is v1 plan 3), over the PR's checkout.
  */
 export async function handleReview(
-  deps: { gh: GitHubClient; llm: LlmProvider },
+  deps: { gh: GitHubClient; llm: LlmProvider; git: GitEnv },
   job: ReviewJob,
   helpers: JobHelpers,
 ): Promise<void> {
   const { gh, llm } = deps;
   const reviewId = await helpers.withPgClient(
-    async (pg) => (await pg.query<{ id: string }>(CLAIM_REVIEW_SQL, [job.owner, job.repo, job.number, job.sha])).rows[0]?.id,
+    async (pg) =>
+      (
+        await pg.query<{ id: string }>(CLAIM_REVIEW_SQL, [
+          job.owner,
+          job.repo,
+          job.number,
+          job.sha,
+        ])
+      ).rows[0]?.id,
   );
   if (!reviewId) {
-    helpers.logger.info(`skip ${job.owner}/${job.repo}#${job.number}@${job.sha}: already reviewed or PR unknown`);
+    helpers.logger.info(
+      `skip ${job.owner}/${job.repo}#${job.number}@${job.sha}: already reviewed or PR unknown`,
+    );
     return;
   }
-  const finish = async (result: Result, githubReviewId: number | null = null, findings: (Finding & { published: boolean })[] = []) => {
+  const finish = async (
+    result: Result,
+    githubReviewId: number | null = null,
+    findings: (Finding & { published: boolean })[] = [],
+  ) => {
     await helpers.withPgClient((pg) =>
-      pg.query(FINISH_REVIEW_SQL, [reviewId, result, githubReviewId, JSON.stringify(findings)]),
+      pg.query(FINISH_REVIEW_SQL, [
+        reviewId,
+        result,
+        githubReviewId,
+        JSON.stringify(findings),
+      ]),
     );
   };
   const finalAttempt = helpers.job.attempts >= helpers.job.max_attempts;
@@ -71,26 +95,69 @@ export async function handleReview(
     if (isStale(job.sha, pr.headSha)) return await finish("stale"); // a newer job is queued
 
     // Config from the base branch: a PR must not be able to change its own review.
-    const [diff, rawConfig] = await Promise.all([gh.getDiff(job), gh.getFile(job, CONFIG_PATH, pr.baseRef)]);
+    const rawConfig = await gh.getFile(job, CONFIG_PATH, pr.baseRef);
+    const { worktree, diff } = await checkout(
+      deps.git,
+      job,
+      pr.baseRef,
+      await gh.installationToken(job),
+      helpers,
+    );
     const output = await review(
       llm,
-      { title: pr.title, description: pr.body, diff, config: parseConfig(rawConfig), previousFindings: [] },
+      {
+        title: pr.title,
+        description: pr.body,
+        diff,
+        repoDir: worktree,
+        config: parseConfig(rawConfig),
+        previousFindings: [],
+      },
       { finalAttempt },
     );
 
-    if (isStale(job.sha, (await gh.getPullRequest(job)).headSha)) return await finish("stale");
+    if (isStale(job.sha, (await gh.getPullRequest(job)).headSha))
+      return await finish("stale");
 
-    const { reviewId: githubReviewId, published } = await publishReview(gh, job, diff, output, []);
+    const { reviewId: githubReviewId, published } = await publishReview(
+      gh,
+      job,
+      diff,
+      output,
+      [],
+    );
     const isPublished = new Set(published.map(findingKey));
     await finish(
       "published",
       githubReviewId,
-      output.findings.map((f) => ({ ...f, published: isPublished.has(findingKey(f)) })),
+      output.findings.map((f) => ({
+        ...f,
+        published: isPublished.has(findingKey(f)),
+      })),
     );
   } catch (err) {
     if (finalAttempt) await finish("failed"); // Graphile gives up after this attempt: record it
     throw err;
   }
+}
+
+/** Mirror → fetch → worktree → diff, under the repo lock. The LLM runs outside it. */
+function checkout(
+  env: GitEnv,
+  job: ReviewJob,
+  baseRef: string,
+  token: string,
+  helpers: JobHelpers,
+) {
+  const { owner, repo, number, sha } = job;
+  return withRepoLock(helpers, owner, repo, async () => {
+    await ensureMirror(env, owner, repo, token);
+    await fetchPr(env, owner, repo, number, baseRef, token);
+    const worktree = await addWorktree(env, owner, repo, number, sha, token);
+    // Unextended (3 lines of context, like GitHub's): it also decides which lines are commentable.
+    const diff = await prDiff(env, owner, repo, baseRef, sha, token);
+    return { worktree, diff };
+  });
 }
 
 function parseConfig(raw: string | null): unknown {

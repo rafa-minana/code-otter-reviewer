@@ -1,4 +1,4 @@
-import type { ReviewJob } from "@otter/contracts";
+import type { CleanupJob, ReviewJob } from "@otter/contracts";
 
 export const GITHUB_EVENTS = {
   ping: "ping",
@@ -8,12 +8,6 @@ export const GITHUB_EVENTS = {
 const IMMEDIATE_SECONDS = 0;
 /** Waits for more pushes before reviewing; a newer push restarts it. */
 const PUSH_DEBOUNCE_SECONDS = 120;
-
-const REVIEW_DELAY_BY_ACTION: Readonly<Record<string, number>> = {
-  opened: IMMEDIATE_SECONDS,
-  reopened: IMMEDIATE_SECONDS,
-  synchronize: PUSH_DEBOUNCE_SECONDS,
-};
 
 /** owner/repo end up in filesystem paths and job keys. */
 const SAFE_NAME = /^[A-Za-z0-9_.-]+$/;
@@ -30,31 +24,46 @@ interface PullRequestPayload {
 
 export type WebhookDecision =
   | { kind: "enqueue"; job: ReviewJob; delaySeconds: number }
+  | { kind: "cleanup"; job: Required<CleanupJob> }
   | { kind: "ignore" }
   | { kind: "invalid" };
+
+const review =
+  (delaySeconds: number) =>
+  (job: ReviewJob): WebhookDecision => ({ kind: "enqueue", job, delaySeconds });
+
+/** Closed (merged or not): drop the PR's pending review and its worktrees. */
+const cleanup = ({ owner, repo, number }: ReviewJob): WebhookDecision => ({
+  kind: "cleanup",
+  job: { owner, repo, number },
+});
+
+/** What each pull_request action does; any other action is ignored. */
+const RESOLVERS: Readonly<Record<string, (job: ReviewJob) => WebhookDecision>> =
+  {
+    opened: review(IMMEDIATE_SECONDS),
+    reopened: review(IMMEDIATE_SECONDS),
+    synchronize: review(PUSH_DEBOUNCE_SECONDS),
+    closed: cleanup,
+  };
 
 export function decideWebhook(
   event: string | undefined,
   payload: unknown,
 ): WebhookDecision {
   const pr = (payload ?? {}) as PullRequestPayload;
-  const delaySeconds = reviewDelayFor(event, pr.action);
-  if (delaySeconds === undefined) return { kind: "ignore" };
+  const resolve = resolverFor(event, pr.action);
+  if (!resolve) return { kind: "ignore" };
 
   const job = extractReviewJob(pr);
-  return job ? { kind: "enqueue", job, delaySeconds } : { kind: "invalid" };
+  return job ? resolve(job) : { kind: "invalid" };
 }
 
-function reviewDelayFor(
-  event: string | undefined,
-  action: unknown,
-): number | undefined {
+function resolverFor(event: string | undefined, action: unknown) {
   if (event !== GITHUB_EVENTS.pullRequest || typeof action !== "string")
     return undefined;
   // hasOwn: rejects inherited keys such as "constructor".
-  return Object.hasOwn(REVIEW_DELAY_BY_ACTION, action)
-    ? REVIEW_DELAY_BY_ACTION[action]
-    : undefined;
+  return Object.hasOwn(RESOLVERS, action) ? RESOLVERS[action] : undefined;
 }
 
 function extractReviewJob(pr: PullRequestPayload): ReviewJob | undefined {

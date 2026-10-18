@@ -6,7 +6,7 @@ import {
   type AlertType,
 } from "./constants.js";
 import { selectPublishable } from "./core.js";
-import type { GitHubClient } from "./ports.js";
+import type { GitHubClient, ReviewComment } from "./ports.js";
 import { getTranslation } from "./translations/index.js";
 
 /** Only the label goes inside the alert: multi-line bodies and code blocks would need "> " on every line. */
@@ -69,6 +69,26 @@ export function renderComment(
   return `${label}\n\n${f.body}${suggestion}`;
 }
 
+/** A finding as one of GitHub's inline comments (startLine only for a multi-line range). */
+const toReviewComment = (f: Finding, language: ReviewerOutput["language"]): ReviewComment => ({
+  path: f.path,
+  startLine: f.startLine,
+  line: f.line,
+  side: f.side,
+  body: renderComment(f, language),
+});
+
+/** The same finding as a section of the review body, with its location spelled out. */
+const toBodySection = (f: Finding, language: ReviewerOutput["language"]) =>
+  `---
+
+\`${f.path}:${f.line}\`
+
+${renderComment(f, language)}`;
+
+/** GitHub answers 422 when an inline comment sits on a line it doesn't consider part of the diff. */
+const isRejectedLine = (err: unknown) => (err as { status?: number }).status === 422;
+
 /** selectPublishable() + gh.createReview(); returns the GitHub review id and what was published. */
 export async function publishReview(
   gh: GitHubClient,
@@ -78,17 +98,14 @@ export async function publishReview(
   previous: Finding[],
 ): Promise<{ reviewId: number; published: Finding[] }> {
   const published = selectPublishable(output.findings, diff, previous);
-  const comments = published.map((f) => ({
-    path: f.path,
-    ...(f.startLine !== undefined ? { startLine: f.startLine } : {}),
-    line: f.line,
-    side: f.side,
-    body: renderComment(f, output.language),
-  }));
-  const reviewId = await gh.createReview(
-    job,
-    renderSummary(output, published),
-    comments,
-  );
-  return { reviewId, published };
+  const summary = renderSummary(output, published);
+  const comments = published.map((f) => toReviewComment(f, output.language));
+  try {
+    return { reviewId: await gh.createReview(job, summary, comments), published };
+  } catch (err) {
+    if (!isRejectedLine(err) || !comments.length) throw err;
+    // Our local diff disagreed with GitHub's: post the findings in the body rather than lose the review.
+    const body = [summary, ...published.map((f) => toBodySection(f, output.language))].join("\n\n");
+    return { reviewId: await gh.createReview(job, body, []), published };
+  }
 }

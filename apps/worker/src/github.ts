@@ -10,7 +10,9 @@ import type { GitHubClient } from "./ports.js";
  */
 function asText(data: unknown, what: string): string {
   if (typeof data !== "string") {
-    throw new Error(`GitHub returned ${typeof data} instead of text for ${what}`);
+    throw new Error(
+      `GitHub returned ${typeof data} instead of text for ${what}`,
+    );
   }
   return data;
 }
@@ -50,14 +52,6 @@ export function octokitClient({
         baseRef: data.base.ref,
         headSha: data.head.sha,
       };
-    },
-
-    async getDiff(job) {
-      const { data } = await forJob(job).pulls.get({
-        ...pr(job),
-        mediaType: { format: "diff" },
-      });
-      return asText(data, `the diff of ${job.owner}/${job.repo}#${job.number}`);
     },
 
     async getFile(job, path, ref) {

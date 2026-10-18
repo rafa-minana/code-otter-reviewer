@@ -1,5 +1,5 @@
 import { Hono, type Context } from "hono";
-import type { ReviewJob } from "@otter/contracts";
+import type { CleanupJob, ReviewJob } from "@otter/contracts";
 import { DEFAULT_BODY_LIMIT } from "../constraints/constraints.js";
 import { decideWebhook, GITHUB_EVENTS } from "../github/pull-request-event.js";
 import { verifySignature } from "../github/signature.js";
@@ -15,9 +15,12 @@ export type EnqueueReview = (
   delaySeconds: number,
 ) => Promise<void>;
 
+export type EnqueueCleanup = (job: Required<CleanupJob>) => Promise<void>;
+
 export interface WebhookDeps {
   webhookSecret: string;
   enqueueReview: EnqueueReview;
+  enqueueCleanup: EnqueueCleanup;
 }
 
 export function webhookRoutes(deps: WebhookDeps): Hono {
@@ -56,6 +59,9 @@ async function handleWebhook(c: Context, deps: WebhookDeps): Promise<Response> {
     case "enqueue":
       // If this throws, Hono answers 500 and GitHub redelivers.
       await deps.enqueueReview(decision.job, decision.delaySeconds);
+      return c.body(null, HTTP_STATUS.accepted);
+    case "cleanup":
+      await deps.enqueueCleanup(decision.job);
       return c.body(null, HTTP_STATUS.accepted);
   }
 }

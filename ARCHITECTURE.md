@@ -64,19 +64,28 @@ Graphile Worker es una librería de Node que usa tablas de Postgres como cola de
 
 ```
 /var/otter/                         # misma ruta en el host y en el worker
-├── mirrors/<owner>__<repo>.git     # clon bare (--filter=blob:none), una vez por repo
-├── worktrees/<owner>__<repo>__pr<n>__<sha>/   # checkout del SHA del PR
+├── mirrors/<owner>/<repo>.git          # clon bare (--filter=blob:none), una vez por repo
+├── worktrees/<owner>/<repo>/pr<n>/<sha>/  # checkout del SHA del PR; solo el último por PR
 └── (volúmenes Docker) otter-pr-<owner>-<repo>-<n>, otter-deps-<owner>-<repo>-<lockhash>
 ```
 
-1. ¿Existe el mirror? Si no existe → `git clone --bare --filter=blob:none`.
-2. `git fetch origin pull/<n>/head:refs/otter/pr<n>`, con advisory lock de Postgres por repo para que no choquen dos fetch del mismo repo.
-3. `git worktree add worktrees/…__<sha> <sha>`.
-4. Se monta en el revisor en solo lectura. El mirror también se monta en solo lectura y en la misma ruta, para que funcionen `git log` y `git blame` dentro.
+1. ¿Existe el mirror? Si no existe → `git clone --bare --filter=blob:none` (en un directorio temporal que luego se renombra, para no dejar mirrors a medias).
+2. `git fetch origin pull/<n>/head:refs/otter/pr<n> heads/<base>:refs/otter/base/<base>`.
+3. `git worktree add worktrees/…/pr<n>/<sha> <sha>`. Si ya existe (reintento del mismo job), se reutiliza. Los worktrees de SHAs anteriores del mismo PR se borran, porque ya no sirven.
+4. `git diff refs/otter/base/<base>...<sha>`: el diff desde el merge-base, como lo calcula GitHub. Sustituye al diff de la API, así que ya no existe su límite de 300 ficheros. Ese diff (con 3 líneas de contexto) decide qué líneas son comentables; al LLM le llega ampliado con el contexto dinámico, leído del worktree.
+5. Se monta en el revisor en solo lectura (plan 3 de v1). El mirror también se monta en solo lectura y en la misma ruta, para que funcionen `git log` y `git blame` dentro.
+
+Los pasos 1 a 4 van con un **advisory lock de Postgres por repo**, para que dos workers no toquen el mismo mirror a la vez. El LLM corre fuera del lock.
+
+**El repo no es de fiar:** git se ejecuta sin shell, con `core.hooksPath=/dev/null`, y el diff con `--no-ext-diff --no-textconv` y prefijos fijos, para que ni la config ni los `.gitattributes` del repo ejecuten nada. El contexto dinámico solo lee ficheros normales cuya ruta real está dentro del worktree: un symlink que apunte fuera filtraría ficheros del host al LLM.
+
+**Clon parcial y token:** con `blob:none`, git descarga el contenido de los ficheros bajo demanda (al crear el worktree o calcular el diff), así que esos comandos también necesitan el token. Va en variables de entorno (`GIT_CONFIG_*` → `http.extraHeader`), nunca en los argumentos ni en la config del mirror. **Pendiente para el plan 3:** sin token dentro del revisor, `git log`/`git blame` no podrán descargar contenido que falte.
 
 **Misma ruta en todos lados:** los revisores son contenedores "hermanos" del worker, así que Docker resuelve sus volúmenes con rutas del host. Por eso `/var/otter` se monta en el worker en la misma ruta.
 
-El token de instalación de la GitHub App (caduca a la hora) se pide en cada fetch y nunca entra al revisor.
+El token de instalación de la GitHub App (caduca a la hora) se pide en cada revisión y nunca entra al revisor.
+
+**En macOS** (Docker Desktop), `/var/otter` vive dentro de la VM de Docker, no en el disco del Mac: se inspecciona con `docker compose exec worker ls /var/otter`.
 
 ## 5. Contenedor revisor
 
@@ -108,7 +117,7 @@ Basada en PR-Agent (`pr_agent/algo/pr_processing.py` y `git_patch_processing.py`
 
 1. **Filtrar** las rutas de `.otter.yaml`, junto con lockfiles, código generado, vendorizado, minificado y binarios. Sus nombres van a la sección "Omitidos por filtro".
 2. **Ficheros borrados enteros:** solo se incluye su nombre, en la sección "Ficheros borrados".
-3. **Ampliar el contexto de cada hunk.** Al contexto que ya trae git se suman 5 líneas antes y 1 después. Además hay *contexto dinámico*: hasta 10 líneas hacia arriba buscando la cabecera de la función o clase que contiene el hunk. Esa cabecera la da git en la línea `@@ … @@ <función>`, así que no hace falta parser. Requiere el fichero completo: **v1** (con worktree). En v0 se usa el contexto estándar de git.
+3. **Ampliar el contexto de cada hunk.** Al contexto que ya trae git se suman 7 líneas antes y 7 después (`CONTEXT_LINES_BEFORE` / `CONTEXT_LINES_AFTER` en `reviewer/constants.ts`; PR-Agent usa 5 y 1). Además hay *contexto dinámico*: hasta 10 líneas más hacia arriba buscando la cabecera de la función o clase que contiene el hunk. Esa cabecera la da git en la línea `@@ … @@ <función>`, así que no hace falta parser. Lee el fichero completo del worktree (**v1**, plan 1 hecho).
 4. **Renderizar con números de línea**, en el formato de PR-Agent:
    ```
    ## File: 'src/auth.ts'
@@ -212,9 +221,10 @@ Una sola función `cleanupPr()` (y `cleanupRepo()`), usada por el evento de cier
 
 | Ámbito | Se elimina | Se mantiene |
 |---|---|---|
-| PR | revisión pendiente (por jobKey), worktrees, `refs/otter/pr<n>`, volumen del PR, filas de la BD | mirror |
+| PR | revisión pendiente (por jobKey), worktrees, `refs/otter/pr<n>`, volumen del PR | mirror, filas de la BD |
 | Repo | todo lo anterior para todos sus PRs, el mirror y la caché de deps | — |
 
+- **Cierre del PR (hecho en v1, plan 1):** en una transacción, la api marca el PR como `closed`, quita su revisión pendiente (`graphile_worker.remove_job`) y encola `cleanup`. El worker, con el lock del repo, borra los worktrees y `refs/otter/pr<n>`. Las filas de la BD se quedan, porque borrarlas a mitad de una revisión haría fallar el `INSERT` de sus hallazgos; las borrará el barrendero.
 - **Barrendero (janitor):** trabajo periódico que borra los PRs sin actividad en 5 días y los repos sin actividad en N días. Si llega un push a un PR ya limpiado, se recrea todo, porque solo era caché.
 - **Recursos:** los contenedores son `--rm`, así que al terminar no queda RAM ocupada. Lo que se libera es disco.
 - **Límite de concurrencia:** un máximo global de revisores simultáneos (CPU y RAM).
@@ -298,6 +308,8 @@ Entre procesos, el desacople ya lo dan la cola, los ficheros montados y `@otter/
 
 1. **v0:** webhook → diff por la API → LLM → verificador → review con comentarios inline. Sin sandbox. Compactación: pasos 1, 2, 4, 5 y 6, sin contexto dinámico.
 2. **v1:** mirror + worktree + contenedor revisor + linters + agente con herramientas de solo lectura + contexto dinámico (paso 3).
+   - ✅ Plan 1: mirror + worktree, diff de git (sin el límite de la API), contexto dinámico, limpieza al cerrar el PR.
+   - Pendiente: contenedor revisor, agente con herramientas, linters y SAST, red restringida.
 3. **v2:** revisión incremental completa, endpoints admin, barrendero, comandos `@otter`.
 
 ## 13. Pendiente de verificar

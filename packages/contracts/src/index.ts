@@ -32,6 +32,7 @@ export interface ReviewerInput {
   title: string;
   description: string;
   diff: string;
+  repoDir?: string; // checkout of the PR's head; enables dynamic context (absent = diff only)
   config: unknown; // parsed .otter.yaml
   previousFindings: Finding[];
 }

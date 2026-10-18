@@ -1,5 +1,10 @@
 import { extname, matchesGlob } from "node:path";
-import { DEFAULT_IGNORE } from "./constants.js";
+import {
+  CONTEXT_LINES_AFTER,
+  CONTEXT_LINES_BEFORE,
+  DEFAULT_IGNORE,
+  FUNCTION_HEADER_SEARCH_LINES,
+} from "./constants.js";
 import type { Chunk, ChunkedDiff, FileDiff, Hunk } from "./types.js";
 
 // Diff compaction (ARCHITECTURE.md §5), simplified from PR-Agent's pr_processing.py.
@@ -36,6 +41,67 @@ function parseHunk(text: string): Hunk {
   };
 }
 
+/** Lines of a file in the PR's head, or null when it can't or mustn't be read. */
+export type ReadLines = (path: string) => string[] | null;
+
+const newSideLength = (h: Hunk) => h.lines.filter((l) => l[0] !== "-").length;
+
+/**
+ * Dynamic context: adds unchanged lines from the full file around each hunk — a few before, one after,
+ * and further up when that reaches the function named in the hunk header. Never overlaps the
+ * neighbouring hunks, so no line shows up twice.
+ */
+export function extendContext(
+  files: FileDiff[],
+  readLines: ReadLines,
+): FileDiff[] {
+  return files.map((f) => {
+    const lines =
+      f.deleted || f.binary || !f.hunks.length ? null : readLines(f.path);
+    if (!lines) return f;
+    let covered = 0; // last new-side line already shown, by an earlier hunk or its extension
+    const hunks = f.hunks.map((h, i) => {
+      const end = h.newStart + newSideLength(h) - 1;
+      const nextStart = f.hunks[i + 1]?.newStart ?? lines.length + 1;
+      const room = h.newStart - 1 - covered;
+
+      let before = Math.min(CONTEXT_LINES_BEFORE, room);
+      const fn = h.header.replace(/^@@[^@]*@@/, "").trim();
+      if (fn) {
+        const limit = Math.min(
+          CONTEXT_LINES_BEFORE + FUNCTION_HEADER_SEARCH_LINES,
+          room,
+        );
+        for (let k = before + 1; k <= limit; k++) {
+          if (lines[h.newStart - k - 1].trim().startsWith(fn)) {
+            before = k;
+            break;
+          }
+        }
+      }
+      const after = Math.max(
+        0,
+        Math.min(CONTEXT_LINES_AFTER, nextStart - 1 - end, lines.length - end),
+      );
+      covered = end + after;
+
+      const start = h.newStart - before;
+      const context = (from: number, count: number) =>
+        lines.slice(from - 1, from - 1 + count).map((l) => ` ${l}`);
+      return {
+        ...h,
+        newStart: start,
+        lines: [
+          ...context(start, before),
+          ...h.lines,
+          ...context(end + 1, after),
+        ],
+      };
+    });
+    return { ...f, hunks };
+  });
+}
+
 /** PR-Agent format: only the new side is numbered, since that is where comments go. */
 function renderFile(f: FileDiff): string {
   const out = [`## File: '${f.path}'`];
@@ -61,7 +127,12 @@ const changeSize = (f: FileDiff) =>
 
 export function chunkDiff(
   diff: string,
-  opts: { maxTokens: number; maxCalls: number; ignore: string[] },
+  opts: {
+    maxTokens: number;
+    maxCalls: number;
+    ignore: string[];
+    readLines?: ReadLines;
+  },
 ): ChunkedDiff {
   const globs = [...DEFAULT_IGNORE, ...opts.ignore];
   const files = parseDiff(diff);
@@ -70,7 +141,10 @@ export function chunkDiff(
   const filtered = files.filter(isFiltered).map((f) => f.path);
   const kept = files.filter((f) => !isFiltered(f));
   const deleted = kept.filter((f) => f.deleted).map((f) => f.path);
-  const live = kept.filter((f) => !f.deleted && f.hunks.length);
+  const changed = kept.filter((f) => !f.deleted && f.hunks.length);
+  const live = opts.readLines
+    ? extendContext(changed, opts.readLines)
+    : changed;
 
   const whole = toChunk(live);
   if (countTokens(whole.text) <= opts.maxTokens) {

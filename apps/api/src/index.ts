@@ -3,6 +3,7 @@ import { runMigrations } from "graphile-worker";
 import pg from "pg";
 import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
+import { enqueueCleanup } from "./queue/enqueue-cleanup.js";
 import { enqueueReview } from "./queue/enqueue-review.js";
 
 const config = loadConfig(process.env);
@@ -15,6 +16,7 @@ const pool = new pg.Pool({ connectionString: config.databaseUrl });
 const app = createApp({
   webhookSecret: config.webhookSecret,
   enqueueReview: (job, delaySeconds) => enqueueReview(pool, job, delaySeconds),
+  enqueueCleanup: (job) => enqueueCleanup(pool, job),
 });
 
 serve({ fetch: app.fetch, port: config.port }, ({ port }) =>

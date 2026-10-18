@@ -19,7 +19,10 @@ const output = (o: Partial<ReviewerOutput> = {}): ReviewerOutput => ({
 test("renderSummary: ready to merge only when there are no findings and nothing was left out", () => {
   const ready = renderSummary(output(), []);
   assert.match(ready, /Adds login\./);
-  assert.match(ready, /> \[!TIP\]\n> No issues found\. This PR is ready to merge\./);
+  assert.match(
+    ready,
+    /> \[!TIP\]\n> No issues found\. This PR is ready to merge\./,
+  );
 
   const partial = renderSummary(
     output({ notReviewed: ["big.ts"], filtered: ["yarn.lock"] }),
@@ -37,9 +40,18 @@ test("renderSummary: ready to merge only when there are no findings and nothing 
 });
 
 test("renderSummary shows the risk as a GitHub alert coloured by level", () => {
-  assert.match(renderSummary(output({ risk: "high" }), []), /> \[!CAUTION\]\n> \*\*Risk: high\*\*/);
-  assert.match(renderSummary(output({ risk: "medium" }), []), /> \[!WARNING\]\n> \*\*Risk: medium\*\*/);
-  assert.match(renderSummary(output({ risk: "low" }), []), /> \[!TIP\]\n> \*\*Risk: low\*\*/);
+  assert.match(
+    renderSummary(output({ risk: "high" }), []),
+    /> \[!CAUTION\]\n> \*\*Risk: high\*\*/,
+  );
+  assert.match(
+    renderSummary(output({ risk: "medium" }), []),
+    /> \[!WARNING\]\n> \*\*Risk: medium\*\*/,
+  );
+  assert.match(
+    renderSummary(output({ risk: "low" }), []),
+    /> \[!TIP\]\n> \*\*Risk: low\*\*/,
+  );
 });
 
 test("renderSummary counts the published findings by severity, and has no table without them", () => {
@@ -53,7 +65,10 @@ test("renderSummary counts the published findings by severity, and has no table 
     /\*\*Findings:\*\*\n\n\| Critical \| Major \| Minor \| Nit \|\n\|:-:\|:-:\|:-:\|:-:\|\n\| 1 \| 2 \| 0 \| 0 \|/,
   );
   // Findings off the diff are not published, so they are not counted either.
-  assert.doesNotMatch(renderSummary(output({ findings: [finding(99)] }), []), /Findings:/);
+  assert.doesNotMatch(
+    renderSummary(output({ findings: [finding(99)] }), []),
+    /Findings:/,
+  );
 });
 
 test("renderSummary and renderComment use the configured language", () => {
@@ -61,7 +76,10 @@ test("renderSummary and renderComment use the configured language", () => {
     renderSummary(output({ language: "es", risk: "high" }), []),
     /Riesgo: alto[\s\S]*listo para mergear/,
   );
-  assert.match(renderComment(finding(2), "es"), /^> \[!WARNING\]\n> \*\*Importante\*\*/);
+  assert.match(
+    renderComment(finding(2), "es"),
+    /^> \[!WARNING\]\n> \*\*Importante\*\*/,
+  );
 });
 
 test("renderComment: severity as a coloured alert, unverified tag, body and suggestion outside the alert", () => {
@@ -70,11 +88,20 @@ test("renderComment: severity as a coloured alert, unverified tag, body and sugg
     "> [!WARNING]\n> **Major**\n\nbug\n\n**Suggestion:**\n```\nreturn null;\n```",
   );
   assert.match(
-    renderComment({ ...finding(2), severity: "critical", confidence: undefined }, "en"),
+    renderComment(
+      { ...finding(2), severity: "critical", confidence: undefined },
+      "en",
+    ),
     /^> \[!CAUTION\]\n> \*\*Critical\*\* _\(unverified\)_\n\nbug$/,
   );
-  assert.match(renderComment({ ...finding(2), severity: "minor" }, "en"), /^> \[!NOTE\]/);
-  assert.match(renderComment({ ...finding(2), severity: "nit" }, "en"), /^> \[!TIP\]/);
+  assert.match(
+    renderComment({ ...finding(2), severity: "minor" }, "en"),
+    /^> \[!NOTE\]/,
+  );
+  assert.match(
+    renderComment({ ...finding(2), severity: "nit" }, "en"),
+    /^> \[!TIP\]/,
+  );
 });
 
 test("publishReview posts ONE review with only the publishable findings", async () => {
@@ -112,7 +139,7 @@ test("publishReview posts ONE review with only the publishable findings", async 
   assert.equal(calls.length, 1);
   assert.match(calls[0].body, /\| 0 \| 2 \| 0 \| 0 \|/); // the off-diff finding is not counted
   assert.deepEqual(calls[0].comments, [
-    { path: "a.ts", line: 2, side: "RIGHT", body: "> [!WARNING]\n> **Major**\n\nbug" },
+    { path: "a.ts", startLine: undefined, line: 2, side: "RIGHT", body: "> [!WARNING]\n> **Major**\n\nbug" },
     {
       path: "a.ts",
       startLine: 20,
@@ -121,4 +148,50 @@ test("publishReview posts ONE review with only the publishable findings", async 
       body: "> [!WARNING]\n> **Major**\n\nrange",
     },
   ]);
+});
+
+test("publishReview: if GitHub rejects an inline line (422), it posts the findings in the body instead", async () => {
+  const calls: { body: string; comments: ReviewComment[] }[] = [];
+  const gh = {
+    createReview: async (
+      _job: ReviewJob,
+      body: string,
+      comments: ReviewComment[],
+    ) => {
+      calls.push({ body, comments });
+      if (comments.length)
+        throw Object.assign(new Error("Unprocessable Entity"), { status: 422 });
+      return 456;
+    },
+  } as unknown as GitHubClient;
+  const job = { installationId: 1, owner: "o", repo: "r", number: 1, sha: "s" };
+
+  const { reviewId, published } = await publishReview(
+    gh,
+    job,
+    DIFF,
+    output({ findings: [finding(2)] }),
+    [],
+  );
+  assert.equal(reviewId, 456);
+  assert.equal(published.length, 1);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[1].comments, []);
+  assert.match(
+    calls[1].body,
+    /`a\.ts:2`\n\n> \[!WARNING\]\n> \*\*Major\*\*\n\nbug/,
+  );
+});
+
+test("publishReview rethrows any other GitHub error", async () => {
+  const gh = {
+    createReview: async () => {
+      throw Object.assign(new Error("Server Error"), { status: 500 });
+    },
+  } as unknown as GitHubClient;
+  const job = { installationId: 1, owner: "o", repo: "r", number: 1, sha: "s" };
+  await assert.rejects(
+    publishReview(gh, job, DIFF, output({ findings: [finding(2)] }), []),
+    /Server Error/,
+  );
 });

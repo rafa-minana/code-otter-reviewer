@@ -28,6 +28,12 @@ export const LLM_REASONING_LEVELS = [
 /** `language` values accepted in .otter.yaml, and the name the model is told to write in. */
 export const LANGUAGES = { en: "English", es: "Spanish" } as const;
 
+/** Dynamic context (ARCHITECTURE.md §5, step 3): extra lines around each hunk, from the full file. */
+export const CONTEXT_LINES_BEFORE = 7;
+export const CONTEXT_LINES_AFTER = 7;
+/** How much further up to look for the enclosing function named in the `@@ … @@ <function>` header. */
+export const FUNCTION_HEADER_SEARCH_LINES = 10;
+
 /** Never worth reviewing: lockfiles, generated, vendored, minified and build output. */
 export const DEFAULT_IGNORE = [
   "**/package-lock.json",

@@ -1,6 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chunkDiff, parseDiff } from "./diff.js";
+import {
+  CONTEXT_LINES_AFTER,
+  CONTEXT_LINES_BEFORE,
+  FUNCTION_HEADER_SEARCH_LINES,
+} from "./constants.js";
+import { chunkDiff, extendContext, parseDiff } from "./diff.js";
 
 const fileDiff = (path: string, body: string) =>
   `diff --git a/${path} b/${path}\nindex 1..2 100644\n--- a/${path}\n+++ b/${path}\n${body}`;
@@ -108,4 +113,70 @@ test("when it does not fit: drops delete-only hunks, main language first, packs 
   );
   assert.deepEqual(r.notReviewed, ["src/c.ts", "README.md"]);
   assert.ok(!r.chunks.some((c) => c.text.includes("rm.ts")));
+});
+
+// Expectations derive from the tuning constants, so changing them doesn't break these tests.
+const B = CONTEXT_LINES_BEFORE;
+const A = CONTEXT_LINES_AFTER;
+const SEARCH = FUNCTION_HEADER_SEARCH_LINES;
+
+// A file long enough for any tuning, whose line 2 opens the function that git names in the hunk header.
+const FILE_LENGTH = 2 * (B + SEARCH + A) + 20;
+const FILE = Array.from({ length: FILE_LENGTH }, (_, i) =>
+  i === 1 ? "function login(email) {" : `line ${i + 1}`,
+);
+const lineNumbers = (from: number, to: number) =>
+  Array.from({ length: to - from + 1 }, (_, i) => ` line ${from + i}`);
+const hunk = (newStart: number, count: number, fn = "") => ({
+  header: `@@ -${newStart},${count} +${newStart},${count} @@${fn ? ` ${fn}` : ""}`,
+  newStart,
+  lines: Array.from({ length: count }, (_, i) => `+changed ${newStart + i}`),
+});
+const extended = (hunks: ReturnType<typeof hunk>[], lines: string[] | null = FILE) =>
+  extendContext([{ path: "a.ts", deleted: false, binary: false, hunks }], () => lines)[0].hunks;
+
+test("extendContext adds CONTEXT_LINES_BEFORE lines before and CONTEXT_LINES_AFTER after, as context", () => {
+  const start = B + SEARCH + 5; // far from line 2's function and from the file edges
+  const [h] = extended([hunk(start, 2)]);
+  assert.equal(h.newStart, start - B);
+  assert.deepEqual(h.lines, [
+    ...lineNumbers(start - B, start - 1),
+    `+changed ${start}`,
+    `+changed ${start + 1}`,
+    ...lineNumbers(start + 2, start + 1 + A),
+  ]);
+});
+
+test("extendContext reaches up to the function named in the hunk header", () => {
+  const fn = "function login(email) {";
+  const [h] = extended([hunk(2 + B + 3, 1, fn)]); // the header is a few lines past the usual context
+  assert.equal(h.newStart, 2);
+  assert.equal(h.lines[0], ` ${fn}`);
+  // Further up than CONTEXT_LINES_BEFORE + FUNCTION_HEADER_SEARCH_LINES: only the usual context.
+  const far = 2 + B + SEARCH + 1;
+  assert.equal(extended([hunk(far, 1, fn)])[0].newStart, far - B);
+});
+
+test("extendContext never overlaps the neighbouring hunk, nor goes past the file edges", () => {
+  const start = B + SEARCH + 5;
+  // One unchanged line between the hunks: the first one takes it, the second starts right after.
+  const [a, b] = extended([hunk(start, 2), hunk(start + 3, 1)]);
+  assert.equal(a.lines.at(-1), ` line ${start + 2}`);
+  assert.equal(b.newStart, start + 3);
+  assert.equal(b.lines[0], `+changed ${start + 3}`);
+
+  assert.equal(extended([hunk(2, 1)])[0].newStart, 1);
+  assert.equal(extended([hunk(FILE_LENGTH, 1)])[0].lines.at(-1), `+changed ${FILE_LENGTH}`);
+});
+
+test("extendContext leaves files it can't read, and deleted files, as they are", () => {
+  assert.deepEqual(extended([hunk(10, 1)], null), [hunk(10, 1)]);
+  const deleted = { path: "a.ts", deleted: true, binary: false, hunks: [hunk(10, 1)] };
+  assert.deepEqual(extendContext([deleted], () => FILE), [deleted]);
+});
+
+test("chunkDiff applies dynamic context only when it gets readLines", () => {
+  const diff = fileDiff("a.ts", "@@ -30 +30 @@\n-old\n+changed 30\n");
+  assert.doesNotMatch(chunkDiff(diff, opts).chunks[0].text, /line 29/);
+  assert.match(chunkDiff(diff, { ...opts, readLines: () => FILE }).chunks[0].text, /^29  line 29$/m);
 });

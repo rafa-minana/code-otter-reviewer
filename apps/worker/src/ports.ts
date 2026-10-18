@@ -17,7 +17,6 @@ export type ReviewComment = Pick<
 
 export interface GitHubClient {
   getPullRequest(job: ReviewJob): Promise<PullRequest>;
-  getDiff(job: ReviewJob): Promise<string>;
   /** File contents at `ref`, or null when it does not exist. */
   getFile(job: ReviewJob, path: string, ref: string): Promise<string | null>;
   /** Posts ONE review (event COMMENT) with all inline comments; returns its GitHub id. */

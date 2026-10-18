@@ -23,9 +23,23 @@ test("decideWebhook maps actions to review delays", () => {
   );
 });
 
+test("decideWebhook maps closed to a cleanup of that PR", () => {
+  const { owner, repo, number } = EXPECTED_JOB;
+  assert.deepEqual(decideWebhook("pull_request", prPayload("closed")), {
+    kind: "cleanup",
+    job: { owner, repo, number },
+  });
+  assert.deepEqual(
+    decideWebhook("pull_request", {
+      ...prPayload("closed"),
+      repository: { name: "../x", owner: { login: owner } },
+    }),
+    { kind: "invalid" },
+  );
+});
+
 test("decideWebhook ignores other events and actions", () => {
   const ignore = { kind: "ignore" };
-  assert.deepEqual(decideWebhook("pull_request", prPayload("closed")), ignore);
   assert.deepEqual(
     decideWebhook("pull_request", prPayload("constructor")),
     ignore,
