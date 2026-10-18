@@ -99,3 +99,9 @@ export function parseReviewerOutput(raw: unknown): ReviewerOutput {
     );
   return parsed.data;
 }
+
+/** Number of chunks required to cover a finding set. */
+export function findingBatchCount(total: number, batchSize: number): number {
+  if (!Number.isInteger(batchSize) || batchSize < 1) throw new Error("batchSize must be a positive integer");
+  return Math.floor(total / batchSize);
+}
