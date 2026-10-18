@@ -10,6 +10,9 @@ export const MAX_DESCRIPTION_CHARS = 4_000; // the description is untrusted: it 
 
 export const RISKS = ["low", "medium", "high"] as const;
 
+/** `language` values accepted in .otter.yaml, and the name the model is told to write in. */
+export const LANGUAGES = { en: "English", es: "Spanish" } as const;
+
 /** Never worth reviewing: lockfiles, generated, vendored, minified and build output. */
 export const DEFAULT_IGNORE = [
   "**/package-lock.json",

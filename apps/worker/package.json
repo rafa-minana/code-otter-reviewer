@@ -4,6 +4,19 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "dependencies": { "@otter/contracts": "*" },
-  "scripts": { "build": "tsc -b" }
+  "dependencies": {
+    "@octokit/auth-app": "8.3.1",
+    "@octokit/rest": "22.0.1",
+    "@otter/contracts": "*",
+    "@otter/reviewer": "*",
+    "graphile-worker": "0.18.0",
+    "pg": "8.23.1",
+    "yaml": "2.9.1"
+  },
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "devDependencies": {
+    "@types/pg": "8.23.1"
+  }
 }

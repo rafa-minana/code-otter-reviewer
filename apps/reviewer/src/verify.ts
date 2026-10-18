@@ -14,9 +14,10 @@ export async function verify(
   findings: Finding[],
 ): Promise<Finding[]> {
   const listed = findings.map(
-    ({ path, line, severity, body, suggestion }, index) => ({
+    ({ path, startLine, line, severity, body, suggestion }, index) => ({
       index,
       path,
+      startLine,
       line,
       severity,
       body,

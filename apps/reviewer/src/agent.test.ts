@@ -64,6 +64,28 @@ test("caps findings per chunk, sets side RIGHT and keeps the verifier's confiden
   );
 });
 
+test("keeps a real line range; single-line or inverted ranges become one-line findings", async () => {
+  const { llm } = fakeLlm(() => ({
+    summary: "s",
+    risk: "low",
+    findings: [
+      { ...f(3), startLine: 1 },
+      { ...f(5), startLine: 5 },
+      { ...f(7), startLine: 9 },
+    ],
+  }));
+  const out = await review(llm, input(fileDiff("a.ts")));
+  assert.deepEqual(
+    out.findings.map((x) => [x.startLine, x.line]),
+    [
+      [1, 3],
+      [undefined, 5],
+      [undefined, 7],
+    ],
+  );
+  assert.ok(!("startLine" in out.findings[1]));
+});
+
 test("drops findings below REVIEW_MIN_SCORE", async () => {
   const { llm } = fakeLlm(
     () => ({ summary: "s", risk: "low", findings: [f(1)] }),
@@ -122,6 +144,19 @@ test("rejects an invalid .otter.yaml with a clear error", async () => {
     review(llm, input(fileDiff("a.ts"), { ignore: "src" })),
     /invalid \.otter\.yaml/,
   );
+  await assert.rejects(
+    review(llm, input(fileDiff("a.ts"), { language: "fr" })),
+    /invalid \.otter\.yaml/,
+  );
+});
+
+test("language: English by default, the configured one goes to the prompt and the output", async () => {
+  const { llm, calls } = fakeLlm(() => ({ summary: "s", risk: "low", findings: [] }));
+  assert.equal((await review(llm, input(fileDiff("a.ts")))).language, "en");
+  assert.match(calls[0].system, /in English/);
+  const out = await review(llm, input(fileDiff("a.ts"), { language: "es" }));
+  assert.equal(out.language, "es");
+  assert.match(calls[1].system, /in Spanish/);
 });
 
 test("merges chunks: union without duplicates, most conservative risk", async () => {

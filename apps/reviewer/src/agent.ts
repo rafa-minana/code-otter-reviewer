@@ -8,6 +8,7 @@ import {
   REVIEW_MAX_FINDINGS,
   REVIEW_MAX_INPUT_TOKENS,
   REVIEW_MIN_SCORE,
+  LANGUAGES,
   RISKS,
 } from "./constants.js";
 import { chunkDiff, countTokens } from "./diff.js";
@@ -18,6 +19,7 @@ import { filterByConfidence, verify } from "./verify.js";
 
 // .otter.yaml comes from the PR's repo: validate it, never trust its shape.
 const configSchema = z.object({
+  language: z.enum(["en", "es"]).default("en"),
   ignore: z.array(z.string()).default([]),
   instructions: z
     .array(z.object({ path: z.string(), text: z.string() }))
@@ -30,6 +32,7 @@ const reviewSchema = z.object({
   findings: z.array(
     z.object({
       path: z.string(),
+      startLine: z.number().int(),
       line: z.number().int(),
       severity: z.enum(["critical", "major", "minor", "nit"]),
       body: z.string(),
@@ -47,11 +50,13 @@ export async function review(
   if (!parsed.success)
     throw new Error(`invalid .otter.yaml: ${z.prettifyError(parsed.error)}`);
   const config = parsed.data;
+  const language = LANGUAGES[config.language];
 
   const header = `# Pull request\nTitle: ${input.title}\nDescription:\n${input.description.slice(0, MAX_DESCRIPTION_CHARS)}`;
   const reserved =
     countTokens(
-      reviewSystemPrompt(REVIEW_MAX_FINDINGS, config.instructions) + header,
+      reviewSystemPrompt(REVIEW_MAX_FINDINGS, config.instructions, language) +
+        header,
     ) + OUTPUT_RESERVE_TOKENS;
   const { chunks, filtered, deleted, notReviewed } = chunkDiff(input.diff, {
     maxTokens: REVIEW_MAX_INPUT_TOKENS - reserved,
@@ -73,13 +78,19 @@ export async function review(
           config.instructions.filter((i) =>
             chunk.paths.some((p) => matchesGlob(p, i.path)),
           ),
+          language,
         ),
         prompt: `<untrusted>\n${header}\n\n${context}\n\n# Diff\n${chunk.text}\n</untrusted>`,
         schema: reviewSchema,
       });
       const findings: Finding[] = out.findings
         .slice(0, REVIEW_MAX_FINDINGS)
-        .map((f) => ({ ...f, side: "RIGHT" }));
+        .map(({ startLine, ...f }) => ({
+          ...f,
+          side: "RIGHT",
+          // A single line or a nonsense range (start after end) becomes a one-line finding.
+          ...(startLine >= 1 && startLine < f.line ? { startLine } : {}),
+        }));
       return {
         ...out,
         findings: await verifyChunk(
@@ -97,6 +108,7 @@ export async function review(
   return {
     summary: results.map((r) => r.summary).join("\n\n"),
     risk: RISKS[Math.max(0, ...results.map((r) => RISKS.indexOf(r.risk)))],
+    language: config.language,
     findings: results
       .flatMap((r) => r.findings)
       .filter((f) => {

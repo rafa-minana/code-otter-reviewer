@@ -5,6 +5,9 @@ import { withTransaction } from "../db/transaction.js";
 /** A PR without activity for this long is cleaned up by the janitor. */
 const PR_INACTIVITY_TTL = "5 days";
 
+/** Each attempt repeats every LLM call: enough for a transient 429/timeout, bounded in cost. */
+const REVIEW_MAX_ATTEMPTS = 3;
+
 const UPSERT_REPO_SQL = `
   INSERT INTO repos (owner, name, installation_id)
   VALUES ($1, $2, $3)
@@ -27,7 +30,8 @@ const ADD_JOB_SQL = `
     $2::json,
     run_at       => now() + make_interval(secs => $3),
     job_key      => $4,
-    job_key_mode => 'replace'
+    job_key_mode => 'replace',
+    max_attempts => $5
   )`;
 
 /** PR state and its review job are written in ONE transaction (ARCHITECTURE.md §3). */
@@ -35,7 +39,7 @@ export async function enqueueReview(pool: Pool, job: ReviewJob, delaySeconds: nu
   await withTransaction(pool, async (tx) => {
     const repoId = await upsertRepo(tx, job);
     await tx.query(UPSERT_PULL_REQUEST_SQL, [repoId, job.number, PR_INACTIVITY_TTL]);
-    await tx.query(ADD_JOB_SQL, [TASKS.review, JSON.stringify(job), delaySeconds, reviewJobKey(job)]);
+    await tx.query(ADD_JOB_SQL, [TASKS.review, JSON.stringify(job), delaySeconds, reviewJobKey(job), REVIEW_MAX_ATTEMPTS]);
   });
 }
 

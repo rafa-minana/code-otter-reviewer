@@ -45,7 +45,7 @@ Graphile Worker es una librería de Node que usa tablas de Postgres como cola de
 - **Espera entre pushes (debounce):** cada trabajo de revisión se encola con `jobKey = review:<owner>/<repo>#<n>` en modo `replace`. Un push nuevo sustituye al trabajo pendiente y reinicia la espera.
 - **Push durante una revisión:** se deja terminar, y antes de publicar se compara el SHA revisado con el último del PR. Si ya no es el último, la revisión se descarta, porque habrá otra encolada.
 - **Idempotencia:** GitHub puede reenviar eventos. Cada `(PR, SHA)` se revisa una sola vez.
-- **Reintentos:** automáticos, con espera exponencial (lo hace Graphile Worker).
+- **Reintentos:** automáticos, con espera exponencial (lo hace Graphile Worker). Máximo **3 intentos** (`max_attempts` en el `add_job`), porque cada intento repite todas las llamadas al LLM. Si falla el último, la review queda en BD con `result = 'failed'`.
 - **Encolado transaccional:** el estado del PR y el trabajo se guardan en la misma transacción, mediante `graphile_worker.add_job(..., job_key, job_key_mode => 'replace')` en SQL. La api ejecuta las migraciones de graphile al arrancar, así que puede encolar aunque el worker no haya arrancado.
 
 **Respuestas de `POST /webhook`** (Hono, `apps/api`):
@@ -87,10 +87,10 @@ El token de instalación de la GitHub App (caduca a la hora) se pide en cada fet
 **Entrada:**
 - el worktree;
 - el diff, desde el último SHA revisado (revisión incremental);
-- la config `.otter.yaml` (rutas a ignorar, instrucciones por ruta);
+- la config `.otter.yaml` **de la rama base**, para que un PR no pueda cambiar su propia revisión: `ignore` (rutas a ignorar), `instructions` (instrucciones por ruta) y `language` (`en` por defecto, o `es`), que es el idioma del resumen y de los comentarios;
 - los hallazgos ya publicados, para no repetirlos.
 
-**Salida:** `findings.json` con `{path, line, side, severity, body, suggestion?, confidence}`.
+**Salida:** `findings.json` con `{path, startLine?, line, side, severity, body, suggestion?, confidence?}`. `startLine`–`line` es el rango de líneas del hallazgo, como en el `/review` de PR-Agent; sin `startLine` es una sola línea.
 
 **Pipeline interno:**
 1. Compactar el diff dentro del presupuesto de tokens (ver "Compactación del diff").
@@ -191,9 +191,10 @@ por cada trozo del diff:
 
 ## 6. Publicación (en el worker, nunca en el revisor)
 
-- Validar cada hallazgo contra los trozos del diff, porque GitHub solo deja comentar líneas que aparecen en él (si no, error 422).
-- Publicar **una única** review (`pulls.createReview`) con todos los comentarios inline más un resumen.
-- Guardar en BD el id de la review y los hallazgos publicados.
+- Validar cada hallazgo contra los trozos del diff, porque GitHub solo deja comentar líneas que aparecen en él (si no, error 422). Un rango solo se publica como comentario multilínea si todas sus líneas están en el diff; si no, se comenta solo su última línea. Las sugerencias van en un bloque de código normal: las aplicables con un clic (` ```suggestion `, como el `/improve` de PR-Agent) quedan para más adelante, desactivadas por defecto.
+- Publicar **una única** review (`pulls.createReview`, de tipo `COMMENT` y nunca `APPROVE`) con todos los comentarios inline más un resumen: riesgo, resumen del LLM y ficheros no revisados, omitidos o borrados. Los hallazgos sin `confidence` llevan la marca "sin verificar".
+- Sin hallazgos: el resumen dice que no hay incidencias y que el PR está listo para mergear. Si algún fichero se quedó sin revisar por presupuesto, solo dice que no hay incidencias en los ficheros revisados.
+- Guardar en BD el id de la review y los hallazgos (publicados o no) en una sola sentencia. En v0, `handleReview` llama al motor en el mismo proceso, sin contenedor, con el diff de la API de GitHub.
 
 ## 7. Estado (Postgres)
 

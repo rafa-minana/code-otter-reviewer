@@ -1,0 +1,17 @@
+{
+  "title": "🦦 Revisión de code-otter",
+  "risk.low": "Riesgo: bajo",
+  "risk.medium": "Riesgo: medio",
+  "risk.high": "Riesgo: alto",
+  "severity.critical": "Crítico",
+  "severity.major": "Importante",
+  "severity.minor": "Menor",
+  "severity.nit": "Detalle",
+  "unverified": "sin verificar",
+  "suggestion": "Sugerencia",
+  "readyToMerge": "✅ No se han encontrado incidencias. El PR está listo para mergear.",
+  "noIssuesInReviewed": "No se han encontrado incidencias en los ficheros revisados, pero algunos no se han revisado (ver abajo).",
+  "notReviewed": "No revisados (superan el presupuesto)",
+  "filtered": "Omitidos por filtro",
+  "deleted": "Ficheros borrados"
+}

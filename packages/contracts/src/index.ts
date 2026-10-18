@@ -3,7 +3,8 @@ export type Severity = "critical" | "major" | "minor" | "nit";
 
 export interface Finding {
   path: string;
-  line: number;
+  startLine?: number; // first line of a multi-line range; absent = only `line`
+  line: number; // last line of the range (GitHub's `line`)
   side: "LEFT" | "RIGHT";
   severity: Severity;
   body: string;
@@ -39,6 +40,7 @@ export interface ReviewerInput {
 export interface ReviewerOutput {
   summary: string;
   risk: "low" | "medium" | "high";
+  language: "en" | "es"; // from .otter.yaml, for the worker's fixed texts
   findings: Finding[];
   notReviewed: string[]; // paths left out by the token budget
   filtered: string[]; // paths skipped by .otter.yaml or default filters

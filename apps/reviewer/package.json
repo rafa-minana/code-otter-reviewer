@@ -14,5 +14,9 @@
   },
   "scripts": {
     "build": "tsc -b"
+  },
+  "exports": {
+    ".": "./dist/index.js",
+    "./*.js": "./dist/*.js"
   }
 }

@@ -1,0 +1,17 @@
+{
+  "title": "🦦 code-otter review",
+  "risk.low": "Risk: low",
+  "risk.medium": "Risk: medium",
+  "risk.high": "Risk: high",
+  "severity.critical": "Critical",
+  "severity.major": "Major",
+  "severity.minor": "Minor",
+  "severity.nit": "Nit",
+  "unverified": "unverified",
+  "suggestion": "Suggestion",
+  "readyToMerge": "✅ No issues found. This PR is ready to merge.",
+  "noIssuesInReviewed": "No issues found in the reviewed files, but some files were not reviewed (see below).",
+  "notReviewed": "Not reviewed (over the size budget)",
+  "filtered": "Skipped by filter",
+  "deleted": "Deleted files"
+}
