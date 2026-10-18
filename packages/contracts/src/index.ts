@@ -57,5 +57,13 @@ export interface ReviewerOutput {
 /** Graphile Worker task names: the api enqueues them, the worker registers them. */
 export const TASKS = { review: "review", cleanup: "cleanup" } as const;
 
+/**
+ * Values of LLM_PROVIDER: the reviewer picks its AI SDK provider by it, the gateway its upstream and auth.
+ * "openai" is OpenAI's own API; "openai-compatible" is anything else speaking its protocol (OpenRouter,
+ * Groq, Ollama…) and needs LLM_BASE_URL.
+ */
+export const LLM_PROVIDERS = ["anthropic", "openai", "openai-compatible", "gemini"] as const;
+export type LlmProviderName = (typeof LLM_PROVIDERS)[number];
+
 export const reviewJobKey = (j: Pick<ReviewJob, "owner" | "repo" | "number">) =>
   `review:${j.owner}/${j.repo}#${j.number}`;

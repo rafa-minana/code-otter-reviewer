@@ -15,9 +15,10 @@ GitHub ──webhook──► [api] ──addJob(review, jobKey=PR, replace, +2m
                                                                         [worker]
                                      1. lock por repo (advisory lock) → fetch en el mirror
                                      2. git worktree del SHA del PR
-                                     3. docker run --rm reviewer
-                                          monta: worktree (ro) + volumen del PR + caché de deps
-                                          ──► findings.json
+                                     3. docker run --rm reviewer   (red otter-reviewers, internal: sin internet)
+                                          monta: worktree (ro); LLM_API_KEY = token firmado de esta revisión
+                                          LLM ──► [gateway] ──clave real──► proveedor
+                                          ──► ReviewerOutput (stdout)
                                      4. ¿el SHA sigue siendo el último del PR? si no → descartar
                                      5. validar líneas contra el diff → publicar UNA review (token solo aquí)
                                      6. guardar estado (último SHA revisado, hallazgos publicados)
@@ -32,7 +33,8 @@ pull_request.closed / caducidad 5 días / endpoint admin ──► job cleanup �
 | `api` | Recibe el webhook de GitHub y expone los endpoints `/admin` | Responde 200 rápido y solo encola. No tiene acceso al socket de Docker |
 | `worker` | Ejecuta los trabajos: git, contenedores revisores, publicación y limpieza | Se puede escalar a N réplicas. Monta `/var/run/docker.sock` y `/var/otter` |
 | `postgres` | Estado del sistema y cola de trabajos (Graphile Worker) | Única pieza con datos persistentes |
-| `reviewer` | **Imagen**, no servicio: el worker la lanza en cada revisión | Sin token de GitHub. Red limitada a la API del LLM |
+| `gateway` | Proxy del LLM: única salida de los revisores y único servicio con la clave | Red `default` (internet) + `otter-reviewers`, alias `otter-gateway`. Sin `env_file`: solo recibe las variables `LLM_*` y `GATEWAY_*`. Sin puertos publicados, sistema de ficheros de solo lectura |
+| `reviewer` | **Imagen**, no servicio: el worker la lanza en cada revisión | Sin token de GitHub ni clave del LLM. Red `otter-reviewers` (`internal`): sin internet, solo alcanza el gateway |
 
 ## 3. Escucha y cola (Graphile Worker sobre Postgres)
 
@@ -92,7 +94,7 @@ El token de instalación de la GitHub App (caduca a la hora) se pide en cada rev
 - **Ciclo de vida:** `docker run --rm` en cada revisión, para usar siempre la última imagen sin arrastrar estado viejo. Lo lanza el worker con el CLI de Docker (`worker/runner.ts`), por el socket montado; se llama `otter-review-<id de la review>`.
 - **Aislamiento (hecho en v1, plan 3):** `--read-only` + `/tmp` en tmpfs, `--cap-drop ALL`, `no-new-privileges`, usuario sin privilegios, límites de memoria, CPU, procesos y 15 min de tiempo, y `--pull never`: la imagen se construye en local (`docker compose build reviewer`) y nunca se descarga de un registro. El worktree se monta en `/repo` en solo lectura; nada más del host.
 - **Entorno:** solo las variables `LLM_*` de una lista cerrada (`REVIEWER_LLM_ENV`), pasadas por nombre (`-e LLM_API_KEY`), así que sus valores no aparecen en los argumentos. Nunca el token de GitHub ni la URL de la base de datos.
-- **Preparado para el gateway (plan 6):** la red es `REVIEWER_NETWORK` (por defecto `bridge`, con internet). Con el gateway, esa red pasa a ser interna, `LLM_BASE_URL` apunta al gateway y `LLM_API_KEY` sale de la lista.
+- **Red y clave (hecho en v1, plan 6):** el contenedor va a la red `otter-reviewers` (`REVIEWER_NETWORK`), que docker compose crea como `internal`: sin ruta a internet ni DNS externo. El worker le pone `LLM_BASE_URL=http://otter-gateway:8080` y `LLM_API_KEY=<token de la revisión>`, así que la clave real nunca entra. El worker **falla cerrado**: no arranca si esa red no existe o no es interna (`ensureReviewerNetwork`), ni sin `GATEWAY_SECRET`.
 - **Volumen del PR:** lo que se quiere reutilizar entre revisiones (estado, índices) vive en este volumen, no en el contenedor.
 - **Caché de dependencias por repo:** con la clave en el hash del lockfile.
 
@@ -218,8 +220,62 @@ por cada trozo del diff:
 
 **Seguridad:**
 - El código del PR no es de fiar: la config de un linter puede ser JS ejecutable y puede haber prompt injection.
-- Por eso el revisor no lleva token de GitHub, monta el código en solo lectura y solo tiene salida de red hacia el host del proveedor de LLM configurado (`LLM_PROVIDER` / `LLM_BASE_URL`).
+- Por eso el revisor no lleva token de GitHub ni la clave del LLM, monta el código en solo lectura y su única salida de red es el gateway (ver abajo).
 - El código del PR sí se envía al proveedor del modelo.
+
+### Gateway del LLM (`apps/gateway`, hecho en v1, plan 6)
+
+Proxy propio (Hono, sin LiteLLM): la única salida de los revisores y el único servicio con la clave del LLM. Acepta **exactamente** la llamada que hace el revisor y nada más.
+
+**Token de revisión** (`token.ts`, compartido con el worker):
+- **Formato:** `otter.<reviewId>.<caducidadMs>.<firma>`, con la firma `base64url(HMAC-SHA256(GATEWAY_SECRET, "<reviewId>.<caducidadMs>"))`.
+- **Quién lo firma:** el worker, en cada intento, con una caducidad de 20 minutos (los 15 del contenedor más margen). Se lo pasa al contenedor como `LLM_API_KEY`.
+- **Por qué no hay que tocar el revisor:** el AI SDK lo envía en la cabecera donde iría la clave.
+- **Sin estado:** el worker y el gateway solo comparten el secreto, sin registro de tokens ni conexión entre ellos.
+- **Si alguien lo roba:** solo sirve dentro de la red interna, para un modelo y una ruta, durante 20 minutos y con tope de gasto.
+
+**Por proveedor** (`providers.ts`, una tabla que refleja cómo los llama el AI SDK):
+
+| | anthropic | openai / openai-compatible | gemini |
+|---|---|---|---|
+| Única ruta | `POST /messages` | `POST /chat/completions` | `POST /models/<modelo>:generateContent` |
+| Token / clave en | `x-api-key` | `Authorization: Bearer` | `x-goog-api-key` |
+| Modelo fijado en | el cuerpo | el cuerpo | la ruta |
+| Tokens gastados | `usage.input + output + cache_*` | `usage.total_tokens` | `usageMetadata.totalTokenCount` |
+
+- **Upstream:** `LLM_BASE_URL` o la API oficial del proveedor, con reglas estrictas para que la config diga lo que hace:
+  - `openai` es la API de OpenAI y **no admite** `LLM_BASE_URL`;
+  - `openai-compatible` (OpenRouter, Groq, Ollama…) es el mismo protocolo en otro servidor y la **exige**;
+  - con `anthropic` y `gemini` es opcional.
+
+  Si no se cumplen, el gateway no arranca y dice qué poner.
+- Las dos variantes de OpenAI usan Chat Completions: es lo que hablan todos los compatibles y la única ruta de OpenAI que permite el gateway.
+
+**Comprobaciones de cada petición**, por orden. Cada una corta con un error con la forma del proveedor (`otter gateway: …`), para que el AI SDK muestre el motivo:
+
+| Comprobación | Si falla | ¿Reintenta el SDK? |
+|---|---|---|
+| Cuerpo ≤ 10 MB | 413 | no |
+| Token válido y sin caducar | 401 | no |
+| Ruta exacta, sin query string | 404 | no |
+| JSON con el modelo fijado y sin streaming | 400 / 403 | no |
+| Como mucho 4 peticiones a la vez por intento | 429 + `retry-after: 1` | sí |
+| Presupuesto del intento y tope diario | 403 | no, a propósito |
+
+- **El tope de peticiones a la vez cierra un hueco:** sin él, un revisor comprometido lanzaría todas sus peticiones en paralelo antes de que se contara ningún token.
+- **Reenvío:**
+  - la URL es una constante (`upstream + ruta permitida`), así que no hay SSRF;
+  - `redirect: "error"`, para que una redirección no se lleve la clave a otro sitio;
+  - hacia el proveedor solo pasan las cabeceras `content-type`, `accept`, `anthropic-version`, `anthropic-beta` y `user-agent`, más la clave;
+  - de vuelta, solo `content-type`, `retry-after*` y `request-id`;
+  - timeout de 5 minutos, y se aborta si el revisor corta;
+  - si no se llega al proveedor, 502; si tarda demasiado, 504;
+  - el gateway nunca reintenta: ya lo hace el SDK.
+- **Presupuesto** (`budget.ts`):
+  - por intento: 150 peticiones y 3M tokens (`GATEWAY_REVIEW_MAX_*`). El peor caso legítimo son 66 llamadas: 3 trozos × (11 + 11 pasos);
+  - tope diario opcional (`GATEWAY_DAILY_MAX_TOKENS`), que se reinicia a las 00:00 UTC;
+  - `shortcut:` va en memoria, así que un reinicio del gateway lo pone a cero.
+- **Log:** una línea JSON por petición, con la revisión, el estado, la duración y los tokens (de la petición, del intento y del día). Nunca cuerpos, cabeceras, el token ni la clave.
 
 ## 6. Publicación (en el worker, nunca en el revisor)
 
@@ -273,7 +329,7 @@ Los DELETE son idempotentes y pasan por la cola, para no competir con una revisi
 code-otter/
 ├── docker-compose.yml
 ├── .env.example              # GitHub App, LLM_PROVIDER/MODEL/API_KEY, ADMIN_TOKEN, DATABASE_URL
-├── Dockerfile                # una sola imagen por app: --build-arg APP=api|worker|reviewer
+├── Dockerfile                # una sola imagen por app: --build-arg APP=api|worker|reviewer|gateway
 ├── apps/
 │   ├── api/                  # webhook + /admin
 │   ├── worker/
@@ -286,10 +342,11 @@ code-otter/
 │   │   ├── publish.ts        # selectPublishable + createReview
 │   │   ├── cleanup.ts        # cleanupPr / cleanupRepo / gc
 │   │   └── janitor.ts
+│   ├── gateway/              # proxy del LLM: token.ts, providers.ts, budget.ts, app.ts
 │   └── reviewer/
 │       ├── diff.ts           # trocear y comprimir el diff
 │       ├── linters.ts
-│       ├── llm.ts            # LlmProvider: anthropic | openai | gemini
+│       ├── llm.ts            # LlmProvider: anthropic | openai | openai-compatible | gemini
 │       ├── agent.ts
 │       ├── verify.ts
 │       └── prompts/
@@ -335,12 +392,16 @@ Entre procesos, el desacople ya lo dan la cola, los ficheros montados y `@otter/
    - ✅ Plan 3: contenedor revisor aislado (stdin/stdout, salida validada, solo variables `LLM_*`).
    - ✅ Plan 4: agente con herramientas de solo lectura (`read_file`, `grep`, `find_files`) en el revisor y en el verificador. Sin git log/blame (haría falta montar el mirror) ni ast-grep.
    - ✅ Plan 5: gitleaks como pista para el LLM (solo líneas añadidas, secretos tapados).
-   - Pendiente: red restringida y gateway.
+   - ✅ Plan 6: red interna sin internet y gateway propio con la clave, tokens firmados por revisión, rutas y modelo fijados, y presupuesto por intento y diario.
+   - **v1 completo.**
 3. **v2:** revisión incremental completa, endpoints admin, barrendero, comandos `@otter`.
 
 ## 13. Pendiente de verificar
 
 - ~~Las opciones de Graphile Worker `jobKey` y `replace`~~: verificado en la 0.18.0. `add_job` tiene `job_key_mode` y su valor por defecto es `replace`. Falta verificar cómo se eliminan trabajos por clave (v2).
 - La ubicación actual del plugin code-review de Anthropic.
-- Gateway de LLM (LiteLLM o similar) como servicio aparte: sacaría la API key del revisor y permitiría dejarlo en una red interna sin internet. Pendiente de decidir.
+- ~~Gateway de LLM~~: hecho en el plan 6 (propio, sin LiteLLM). Lo que queda:
+  - **Contadores en memoria:** un reinicio del gateway pone a cero el presupuesto y el tope diario. Pasar a Postgres si hace falta un control de gasto exacto.
+  - **El proveedor sigue recibiendo el código del PR,** por diseño: el gateway limita a quién se habla, no lo que se envía.
+  - **La config del gateway sale del mismo `.env`:** quien pueda editarlo controla la clave y los topes.
 - **El socket de Docker en el worker equivale a ser root en el host** (decisión del plan 3: se deja y se documenta). Quien controla el worker puede crear contenedores que monten el disco del host. Un proxy del socket limita qué llamadas se hacen, pero no evita eso. La mitigación de verdad es un plan propio: Docker rootless, gVisor (`runsc`) o Podman sin root.

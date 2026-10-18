@@ -31,12 +31,12 @@ export interface GitHubClient {
 
 export interface ContainerRunner {
   /**
-   * Runs one review in a throwaway container over the read-only checkout at `worktree`.
+   * Runs review `reviewId` in a throwaway container over the read-only checkout at `worktree`.
    * Returns its raw output: the container touched untrusted code, so the core validates it.
    */
   runReviewer(
     request: ReviewerRequest,
     worktree: string,
-    name: string,
+    reviewId: string,
   ): Promise<unknown>;
 }

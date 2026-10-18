@@ -1,5 +1,5 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": { "rootDir": "src", "outDir": "dist", "resolveJsonModule": true },
-  "include": ["src", "src/**/*.json"], "references": [{ "path": "../../packages/contracts" }, { "path": "../reviewer" }]
+  "include": ["src", "src/**/*.json"], "references": [{ "path": "../../packages/contracts" }, { "path": "../reviewer" }, { "path": "../gateway" }]
 }

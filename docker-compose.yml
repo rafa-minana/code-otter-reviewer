@@ -17,6 +17,7 @@ services:
     env_file: [{ path: .env, required: false }]
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgres://otter:${POSTGRES_PASSWORD:-otter}@postgres:5432/otter}
+      LLM_API_KEY: "" # the real key lives only in the gateway
     ports: ["3000:3000"]
     depends_on: { postgres: { condition: service_healthy } }
 
@@ -25,17 +26,46 @@ services:
     env_file: [{ path: .env, required: false }]
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgres://otter:${POSTGRES_PASSWORD:-otter}@postgres:5432/otter}
+      LLM_API_KEY: "" # the real key lives only in the gateway; reviewers get a per-review token
     user: root # needs the Docker socket; see ARCHITECTURE.md §13 (socket proxy)
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /var/otter:/var/otter # same path as on the host: reviewers are sibling containers
-    depends_on: { postgres: { condition: service_healthy } }
+    depends_on:
+      postgres: { condition: service_healthy }
+      gateway: { condition: service_healthy }
 
-  # Image only, launched by the worker per review: docker compose build reviewer
+  gateway:
+    build: { context: ., args: { APP: gateway } }
+    environment:
+      LLM_PROVIDER: ${LLM_PROVIDER:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      GATEWAY_SECRET: ${GATEWAY_SECRET:-}
+      GATEWAY_REVIEW_MAX_REQUESTS: ${GATEWAY_REVIEW_MAX_REQUESTS:-}
+      GATEWAY_REVIEW_MAX_TOKENS: ${GATEWAY_REVIEW_MAX_TOKENS:-}
+      GATEWAY_DAILY_MAX_TOKENS: ${GATEWAY_DAILY_MAX_TOKENS:-}
+    networks:
+      default: {}
+      reviewers: { aliases: [otter-gateway] }
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 5s
+
   reviewer:
     build: { context: ., args: { APP: reviewer } }
     image: code-otter-reviewer
     profiles: ["build-only"]
+
+networks:
+  reviewers:
+    name: otter-reviewers
+    internal: true
 
 volumes:
   pgdata:

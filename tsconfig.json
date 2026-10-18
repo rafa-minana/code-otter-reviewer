@@ -4,6 +4,7 @@
     { "path": "packages/contracts" },
     { "path": "apps/api" },
     { "path": "apps/worker" },
-    { "path": "apps/reviewer" }
+    { "path": "apps/reviewer" },
+    { "path": "apps/gateway" }
   ]
 }

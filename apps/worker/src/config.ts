@@ -1,3 +1,4 @@
+import { assertGatewaySecret } from "@otter/gateway/token.js";
 import type { GitEnv } from "./git/run.js";
 
 /** Mirrors and worktrees. Same path on the host and in the worker: reviewer containers (v1) are siblings. */
@@ -5,14 +6,19 @@ const DEFAULT_DATA_DIR = "/var/otter";
 const GITHUB_URL = "https://github.com";
 /** Built by `docker compose build reviewer`; never pulled from a registry. */
 const DEFAULT_REVIEWER_IMAGE = "code-otter-reviewer";
-/** Docker's default network (internet access). Plan 6 swaps it for an internal one with the LLM gateway. */
-const DEFAULT_REVIEWER_NETWORK = "bridge";
+/** Internal network created by docker compose: no internet, only the LLM gateway (ARCHITECTURE.md §5). */
+const DEFAULT_REVIEWER_NETWORK = "otter-reviewers";
+/** The gateway's alias on that network; the reviewer's LLM_BASE_URL. */
+const DEFAULT_GATEWAY_URL = "http://otter-gateway:8080";
 /** Simultaneous jobs; each review runs one reviewer container (up to 1 GB RAM, 1 CPU). */
 const DEFAULT_CONCURRENCY = 1;
 
 export interface ReviewerConfig {
   image: string;
   network: string;
+  gatewayUrl: string;
+  /** Signs each review's token; shared with the gateway, never passed to the container. */
+  gatewaySecret: string;
 }
 
 export interface Config {
@@ -39,6 +45,8 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     reviewer: {
       image: env.REVIEWER_IMAGE || DEFAULT_REVIEWER_IMAGE,
       network: env.REVIEWER_NETWORK || DEFAULT_REVIEWER_NETWORK,
+      gatewayUrl: env.REVIEWER_GATEWAY_URL || DEFAULT_GATEWAY_URL,
+      gatewaySecret: assertGatewaySecret(env.GATEWAY_SECRET),
     },
     concurrency: parseConcurrency(env.WORKER_CONCURRENCY),
     appId: GITHUB_APP_ID,
@@ -50,6 +58,9 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
 function parseConcurrency(value: string | undefined): number {
   if (!value) return DEFAULT_CONCURRENCY;
   const n = Number(value);
-  if (!Number.isInteger(n) || n < 1) throw new Error(`WORKER_CONCURRENCY must be a positive integer, got "${value}"`);
+  if (!Number.isInteger(n) || n < 1)
+    throw new Error(
+      `WORKER_CONCURRENCY must be a positive integer, got "${value}"`,
+    );
   return n;
 }

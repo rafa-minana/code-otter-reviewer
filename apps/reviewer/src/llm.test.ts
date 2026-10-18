@@ -18,7 +18,7 @@ test("createLlm validates LLM_REASONING", () => {
 });
 
 test("createLlm accepts supported providers", () => {
-  for (const p of ["anthropic", "openai", "gemini"]) {
+  for (const p of ["anthropic", "openai", "openai-compatible", "gemini"]) {
     assert.equal(typeof createLlm({ LLM_PROVIDER: p, LLM_MODEL: "m", LLM_API_KEY: "k" }).generate, "function");
   }
 });

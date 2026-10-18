@@ -109,11 +109,7 @@ export async function handleReview(
       previousFindings: [],
     };
     const output = parseReviewerOutput(
-      await runner.runReviewer(
-        { input, finalAttempt },
-        worktree,
-        `otter-review-${reviewId}`,
-      ),
+      await runner.runReviewer({ input, finalAttempt }, worktree, reviewId),
     );
 
     if (isStale(job.sha, (await gh.getPullRequest(job)).headSha))

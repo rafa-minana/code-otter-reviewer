@@ -11,6 +11,7 @@ import {
   type LanguageModel,
   type ToolSet,
 } from "ai";
+import { LLM_PROVIDERS, type LlmProviderName } from "@otter/contracts";
 import type { z } from "zod";
 import {
   LLM_REASONING_LEVELS,
@@ -32,16 +33,29 @@ const SUBMIT_TOOL = "submit";
 const SUBMIT_DESCRIPTION =
   "Submit your final answer. Call it exactly once, when you are done.";
 
-export const PROVIDERS = ["anthropic", "openai", "gemini"] as const;
-export type ProviderName = (typeof PROVIDERS)[number];
+interface ProviderSettings {
+  apiKey?: string;
+  baseURL?: string;
+}
+
+/**
+ * The AI SDK model for each LLM_PROVIDER. Both OpenAI flavours use Chat Completions: it's what every
+ * OpenAI-compatible server speaks, and the only OpenAI route the gateway allows.
+ */
+const MODELS: Record<LlmProviderName, (settings: ProviderSettings, model: string) => LanguageModel> = {
+  anthropic: (settings, model) => createAnthropic(settings)(model),
+  openai: (settings, model) => createOpenAI(settings).chat(model),
+  "openai-compatible": (settings, model) => createOpenAI(settings).chat(model),
+  gemini: (settings, model) => createGoogle(settings)(model),
+};
 
 export function createLlm(
   env: Record<string, string | undefined> = process.env,
 ): LlmProvider {
   const provider = env.LLM_PROVIDER;
-  if (!PROVIDERS.includes(provider as ProviderName)) {
+  if (!LLM_PROVIDERS.includes(provider as LlmProviderName)) {
     throw new Error(
-      `LLM_PROVIDER must be one of ${PROVIDERS.join(", ")}; got "${provider}"`,
+      `LLM_PROVIDER must be one of ${LLM_PROVIDERS.join(", ")}; got "${provider}"`,
     );
   }
   if (!env.LLM_MODEL) throw new Error("LLM_MODEL is required");
@@ -57,16 +71,7 @@ export function createLlm(
     apiKey: env.LLM_API_KEY,
     baseURL: env.LLM_BASE_URL || undefined,
   };
-  const factory = {
-    anthropic: createAnthropic,
-    openai: createOpenAI,
-    gemini: createGoogle,
-  }[provider as ProviderName];
-  // OpenAI-compatible endpoints (OpenRouter, local models) speak Chat Completions, not OpenAI's Responses API.
-  const model: LanguageModel =
-    provider === "openai" && settings.baseURL
-      ? createOpenAI(settings).chat(env.LLM_MODEL)
-      : factory(settings)(env.LLM_MODEL);
+  const model = MODELS[provider as LlmProviderName](settings, env.LLM_MODEL);
 
   const common = {
     model,

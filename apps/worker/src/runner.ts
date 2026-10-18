@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { mintReviewToken } from "@otter/gateway/token.js";
 import type { ReviewerConfig } from "./config.js";
 import type { ContainerRunner } from "./ports.js";
 
@@ -13,10 +14,10 @@ const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 const STDERR_TAIL_CHARS = 2_000;
 
 /**
- * The only variables the container gets: the LLM settings, by name (Docker copies each value
- * from the worker's environment, so the key never shows up in argv or `ps`). Never the whole
- * environment: the GitHub key and the database URL must not reach it.
- * Plan 6 (gateway): LLM_BASE_URL points at the gateway and LLM_API_KEY leaves this list.
+ * The only variables the container gets, by name: Docker copies each value from the docker CLI's
+ * environment (reviewerEnv), so none shows up in argv or `ps`. Never the whole environment: the
+ * GitHub key and the database URL must not reach it. LLM_BASE_URL and LLM_API_KEY are always the
+ * gateway's URL and this review's token: the real key lives only in the gateway.
  */
 export const REVIEWER_LLM_ENV = [
   "LLM_PROVIDER",
@@ -62,12 +63,28 @@ export function dockerRunArgs(
   ];
 }
 
+/** Environment of the docker CLI for one review: the LLM settings, pointed at the gateway with a fresh token. */
+export function reviewerEnv(
+  cfg: ReviewerConfig,
+  reviewId: string,
+  base: NodeJS.ProcessEnv = process.env,
+  now = Date.now(),
+): NodeJS.ProcessEnv {
+  return {
+    ...base,
+    LLM_BASE_URL: cfg.gatewayUrl,
+    LLM_API_KEY: mintReviewToken(cfg.gatewaySecret, reviewId, now),
+  };
+}
+
 /** Runs the reviewer image through the Docker socket mounted in the worker. */
 export function dockerRunner(cfg: ReviewerConfig): ContainerRunner {
   return {
-    async runReviewer(request, worktree, name) {
+    async runReviewer(request, worktree, reviewId) {
+      const name = `otter-review-${reviewId}`;
       await removeContainer(name); // a leftover of a crashed attempt would clash on the name
       const run = execFileAsync("docker", dockerRunArgs(cfg, worktree, name), {
+        env: reviewerEnv(cfg, reviewId),
         timeout: REVIEW_TIMEOUT_MS,
         maxBuffer: MAX_OUTPUT_BYTES,
       });
@@ -98,6 +115,29 @@ export async function ensureReviewerImage(cfg: ReviewerConfig): Promise<void> {
   } catch {
     throw new Error(
       `reviewer image "${cfg.image}" not found: run \`docker compose build reviewer\``,
+    );
+  }
+}
+
+/**
+ * Fails closed at startup: reviewers must sit on an internal network (no internet, only the gateway).
+ * A typo or `bridge` here would quietly give untrusted code a way out, so the worker refuses to start.
+ */
+export async function ensureReviewerNetwork(
+  cfg: ReviewerConfig,
+): Promise<void> {
+  const internal = await execFileAsync("docker", [
+    "network",
+    "inspect",
+    "-f",
+    "{{.Internal}}",
+    cfg.network,
+  ])
+    .then(({ stdout }) => stdout.trim() === "true")
+    .catch(() => false);
+  if (!internal) {
+    throw new Error(
+      `reviewer network "${cfg.network}" must exist and be internal: start the stack with \`docker compose up\`, which creates it`,
     );
   }
 }

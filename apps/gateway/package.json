@@ -1,0 +1,19 @@
+{
+  "name": "@otter/gateway",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "dependencies": {
+    "@hono/node-server": "2.1.5",
+    "@otter/contracts": "*",
+    "hono": "4.13.13"
+  },
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "exports": {
+    ".": "./dist/index.js",
+    "./*.js": "./dist/*.js"
+  }
+}

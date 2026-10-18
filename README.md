@@ -18,7 +18,9 @@ flowchart LR
     API -->|queues the job| DB[("Postgres")]
     DB --> W["worker"]
     W -->|"PR code + .otter.yaml"| GH1["GitHub"]
-    W -->|"1. find issues<br/>2. double-check them"| LLM["Your LLM"]
+    W -->|"runs each review in"| R["reviewer<br/>locked-down container,<br/>no internet"]
+    R -->|"1. find issues<br/>2. double-check them"| GW["gateway<br/>holds your API key,<br/>caps the spend"]
+    GW --> LLM["Your LLM"]
     W -->|one review with<br/>inline comments| GH2["Your pull request"]
 ```
 
@@ -31,7 +33,7 @@ In plain words:
 5. **A second AI pass double-checks each finding** and scores it from 0 to 10. Only the ones scoring 7 or more get posted, so you get less noise.
 6. **It posts one review** on your pull request. Each commit is reviewed only once.
 
-Everything runs in Docker: an `api`, a `worker` and a `postgres` database. Each review runs in its own short-lived, locked-down container: it can read the PR's code but can't touch your GitHub token, your database or anything else.
+Everything runs in Docker: an `api`, a `worker`, a `gateway` and a `postgres` database. Each review runs in its own short-lived, locked-down container: it can read the PR's code but can't touch your GitHub token, your database or anything else. It has **no internet access and never sees your LLM API key**: its only way out is the `gateway`, which adds the key, only allows the calls a review makes and stops a review that spends too much.
 
 ---
 
@@ -143,12 +145,13 @@ Then fill it in:
 | `GITHUB_APP_ID` | The App ID from step 2 |
 | `GITHUB_PRIVATE_KEY` | The contents of the `.pem` file (see below) |
 | `GITHUB_WEBHOOK_SECRET` | The secret from step 1 |
-| `LLM_PROVIDER` | `anthropic`, `openai` or `gemini` |
+| `LLM_PROVIDER` | `anthropic`, `openai` (OpenAI's own API), `openai-compatible` (OpenRouter, Groq, Ollama…) or `gemini` |
 | `LLM_MODEL` | The model ID, e.g. `claude-sonnet-5-5` |
-| `LLM_API_KEY` | Your provider's API key |
-| `LLM_BASE_URL` | *Optional.* Only for OpenAI-compatible APIs such as OpenRouter or local models |
+| `LLM_API_KEY` | Your provider's API key. Only the `gateway` ever sees it |
+| `LLM_BASE_URL` | **Required** with `openai-compatible` (e.g. `https://openrouter.ai/api/v1`); not allowed with `openai`; optional otherwise |
 | `LLM_REASONING` | *Optional.* Set it to `none` if your model "thinks" for minutes before answering |
 | `POSTGRES_PASSWORD` | Any password made of letters and numbers, e.g. from `openssl rand -hex 24` |
+| `GATEWAY_SECRET` | A random secret of 32+ characters: `openssl rand -hex 32`. It signs a short-lived pass for each review, so reviews can use your LLM without ever holding your key |
 
 **Pasting the private key.** The `.pem` file has several lines, and you can put it in the `.env` in either of two ways:
 
@@ -177,7 +180,7 @@ LLM_API_KEY=sk-ant-...
 
 **OpenRouter free model** (perfect for trying it out at no cost):
 ```
-LLM_PROVIDER=openai
+LLM_PROVIDER=openai-compatible
 LLM_BASE_URL=https://openrouter.ai/api/v1
 LLM_MODEL=nvidia/nemotron-3-super-120b-a12b:free
 LLM_API_KEY=sk-or-...
@@ -185,12 +188,21 @@ LLM_REASONING=none
 ```
 
 A few things to know about free models:
-- The model **must support structured outputs**, because code-otter asks for answers in a fixed JSON shape. This lists the free ones that do:
+- The model **must support tool calling**: the AI reads your repo with tools and hands in its answer through one. This lists the free ones that do:
   ```bash
-  curl -s https://openrouter.ai/api/v1/models | jq -r '.data[] | select(.pricing.prompt == "0" and (.supported_parameters | index("structured_outputs"))) | .id'
+  curl -s https://openrouter.ai/api/v1/models | jq -r '.data[] | select(.pricing.prompt == "0" and (.supported_parameters | index("tools"))) | .id'
   ```
-- **Limits:** 20 requests per minute and 50 per day without credits. A small review uses about 2 requests.
+- **Limits:** 20 requests per minute and 50 per day without credits. A small review uses about 5–10 requests.
 - **Privacy:** some free providers keep and may use what you send them. **Don't use them with private code.**
+
+**Any other OpenAI-compatible API** (Groq, Together, DeepSeek, a local model with Ollama or LM Studio…) works the same way as OpenRouter: set `LLM_PROVIDER=openai-compatible` and point `LLM_BASE_URL` at it. For example, a model running on your own machine with Ollama:
+```
+LLM_PROVIDER=openai-compatible
+LLM_BASE_URL=http://host.docker.internal:11434/v1
+LLM_MODEL=qwen3-coder
+LLM_API_KEY=ollama
+```
+Only the `gateway` talks to that URL, so the reviewer containers stay without internet whatever you pick. `LLM_API_KEY` can't be empty: if your server doesn't check keys, any value works.
 
 ### Step 5 · Start code-otter
 
@@ -315,19 +327,20 @@ Heads-up: the worker mounts `/var/run/docker.sock` to launch a sandboxed contain
 - Only webhooks with a **valid GitHub signature** are accepted.
 - The PR's title, description and code are treated as **untrusted**. The AI is told to ignore any instructions hidden in them, as a defence against prompt injection.
 - The App asks for the **minimum permissions**: read the code and write reviews.
+- The container that reads the PR's code has **no internet access and no API keys**. It reaches the LLM only through the `gateway`, with a pass that works for that one review, expires in 20 minutes and has a spending cap (150 requests and 3M tokens by default; see `.env.example`).
 - Secrets live only in `.env`, and both `.env` and `*.pem` are git-ignored.
 
 ---
 
-## What v0 can't do yet
+## What it can't do yet
 
 - **No incremental reviews:** each new commit reviews the whole PR again, so earlier comments can repeat.
 - **Size budget:** about 32k tokens of changes per AI call, up to 3 calls per review. Files that don't fit are listed in the summary as *not reviewed*.
-- **One review at a time** per worker. Each review gets up to 3 attempts, and each AI call times out after 3 minutes.
+- **One review at a time** by default (`WORKER_CONCURRENCY` raises it). Each review gets up to 3 attempts.
 - **Code suggestions are plain code blocks,** not GitHub's one-click *suggested changes*.
 - **Rare double post:** if the worker crashes right after posting a review but before saving it, the retry posts it again.
 
-Coming next: a sandbox with linters and repo-aware tools (v1), then incremental reviews and admin tools (v2). See [ARCHITECTURE.md](ARCHITECTURE.md).
+Coming next: incremental reviews, admin tools and automatic clean-up (v2). See [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
 
@@ -335,13 +348,19 @@ Coming next: a sandbox with linters and repo-aware tools (v1), then incremental 
 
 | What you see | What's going on |
 |---|---|
-| A review takes minutes, or never finishes | The model is "thinking" too long. Set `LLM_REASONING=none` (or `low`). Each AI call gives up after 3 minutes and is retried |
-| `401` from the LLM provider | Wrong `LLM_API_KEY`, or `LLM_BASE_URL` is missing when using OpenRouter or another OpenAI-compatible API |
+| A review takes minutes, or never finishes | The model is "thinking" too long. Set `LLM_REASONING=none` (or `low`). Each AI step gives up after about 4 minutes and is retried |
+| `401` from the LLM provider | Wrong `LLM_API_KEY` |
+| The gateway won't start: `LLM_PROVIDER=openai … takes no LLM_BASE_URL` | `openai` means OpenAI's own API. For OpenRouter, Ollama or any other OpenAI-compatible API use `LLM_PROVIDER=openai-compatible` |
+| The gateway won't start: `LLM_PROVIDER=openai-compatible needs LLM_BASE_URL` | Set `LLM_BASE_URL` to that API's address, e.g. `https://openrouter.ai/api/v1` |
 | `No endpoints found matching your data policy` (OpenRouter) | In OpenRouter → **Settings** → **Privacy**, allow the providers behind free models |
 | The api or worker can't connect to Postgres | `POSTGRES_PASSWORD` was changed after the database was created, or `DATABASE_URL` was set by hand. See the warning in step 4 |
 | Nothing reaches the api | Is the smee client running, and is the App's **Webhook URL** right? The App's **Advanced** → **Recent Deliveries** page shows every delivery and lets you resend it |
 | Webhooks arrive but nothing gets reviewed | Is the App installed on that repo, with the permissions from step 2? A commit that was already reviewed won't be reviewed again |
 | The worker won't start: `reviewer image "code-otter-reviewer" not found` | Build it: `docker compose build reviewer` (needed once, and after every update) |
+| The worker won't start: `reviewer network "…" must exist and be internal` | Start everything with `docker compose up`, which creates the `otter-reviewers` network. If your `.env` still has `REVIEWER_NETWORK=bridge` from an older version, change it to `otter-reviewers` |
+| `GATEWAY_SECRET must be at least 32 characters` | Add it to `.env`: `openssl rand -hex 32` |
+| A review fails with `otter gateway: review budget exhausted` | The review hit its spending cap. Huge PRs may need more: raise `GATEWAY_REVIEW_MAX_REQUESTS` or `GATEWAY_REVIEW_MAX_TOKENS` |
+| Reviews fail with `otter gateway: daily token limit reached` | `GATEWAY_DAILY_MAX_TOKENS` was reached; it resets at 00:00 UTC (or when the gateway restarts) |
 | `invalid .otter.yaml` in the logs | The `.otter.yaml` on the base branch has a typo or an unknown field |
 
 ---
