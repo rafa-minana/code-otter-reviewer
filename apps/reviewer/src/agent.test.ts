@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { tmpdir } from "node:os";
 import type { ReviewerInput } from "@otter/contracts";
 import { review } from "./agent.js";
 import type { LlmProvider } from "./llm.js";
@@ -185,4 +186,20 @@ test("no reviewable files: no LLM calls, low risk", async () => {
   assert.equal(calls.length, 0);
   assert.equal(out.risk, "low");
   assert.deepEqual(out.filtered, ["package-lock.json"]);
+});
+
+test("with a checkout, review and verify calls get the read-only repo tools; without one, none", async () => {
+  const out = () => ({ summary: "s", risk: "low", findings: [f(2)] });
+  const withRepo = fakeLlm(out);
+  await review(withRepo.llm, { ...input(fileDiff("a.ts")), repoDir: tmpdir() });
+  assert.deepEqual(
+    withRepo.calls.map((c) => [isVerify(c), Object.keys(c.tools ?? {}).sort()]),
+    [
+      [false, ["find_files", "grep", "read_file"]],
+      [true, ["find_files", "grep", "read_file"]],
+    ],
+  );
+  const withoutRepo = fakeLlm(out);
+  await review(withoutRepo.llm, input(fileDiff("a.ts")));
+  assert.ok(withoutRepo.calls.every((c) => c.tools === undefined));
 });

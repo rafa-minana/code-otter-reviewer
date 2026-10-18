@@ -109,7 +109,7 @@ El token de instalación de la GitHub App (caduca a la hora) se pide en cada rev
 **Pipeline interno:**
 1. Compactar el diff dentro del presupuesto de tokens (ver "Compactación del diff").
 2. Linters y SAST: eslint, ruff, semgrep, gitleaks, ast-grep… Sus resultados se pasan como pistas al modelo.
-3. Agente revisor (LLM) con herramientas de solo lectura dentro del sandbox (grep, read_file, ast-grep) para buscar contexto fuera del diff. El bucle es propio (ver más abajo).
+3. Agente revisor (LLM) con herramientas de solo lectura dentro del sandbox (`read_file`, `grep`, `find_files`) para buscar contexto fuera del diff. El verificador usa las mismas. El bucle es propio (ver más abajo).
 4. Agente verificador: confirma o descarta cada hallazgo y le pone una puntuación de confianza. Se filtra lo que no llega al umbral (patrón del plugin code-review de Anthropic).
 
 ### Compactación del diff
@@ -187,14 +187,26 @@ Dentro del contenedor no hay ningún servidor de LLM. Se ejecuta nuestro program
 /repo (worktree, ro)   stdin: ReviewerRequest   stdout: ReviewerOutput
 
 por cada trozo del diff:
-  ┌─► LLM {system, trozo, pistas de linters, tools: grep | read_file | ast_grep}
+  ┌─► LLM {system, trozo, pistas de linters, tools: read_file | grep | find_files | submit}
   │     ◄── tool_call
   │   el revisor la ejecuta en el sandbox (solo lectura sobre /repo)
   └── devuelve el resultado al modelo
-  … hasta la salida estructurada Finding[] o el máximo de pasos
+  … hasta que llama a submit (la respuesta) o agota los pasos
 ```
 
 - El bucle de herramientas lo da el AI SDK. Nosotros definimos las herramientas y el prompt.
+- **Herramientas** (`apps/reviewer/src/tools.ts`), las mismas que expone Qodo en su toolbox:
+  - `read_file`: hasta 300 líneas por llamada, numeradas como el diff, con los mismos filtros que el contexto dinámico (solo ficheros normales ≤1 MB dentro de `/repo`, sin symlinks);
+  - `grep`: ripgrep, cuyas regex van en tiempo lineal, así que el patrón del modelo no puede colgar la revisión; 50 coincidencias como máximo y timeout de 10 s;
+  - `find_files`: glob con hasta 200 rutas; se rechazan los patrones con `..` o absolutos.
+
+  Los errores vuelven al modelo como texto, y cada llamada se registra en stderr con la ruta, nunca con el contenido.
+- **La respuesta es una herramienta más, `submit`:** con salida estructurada (`response_format`) los modelos contestan de inmediato y no usan herramientas, comprobado con nemotron en OpenRouter. Por eso:
+  - cada paso debe llamar a una herramienta (`toolChoice: required`);
+  - el bucle para al llamar a `submit`;
+  - el paso 11 solo permite `submit`;
+  - su entrada se valida con el mismo schema de zod.
+- **Límites:** 10 pasos de herramienta por llamada, y 6 minutos en total por llamada (revisión + verificación < 15 minutos del contenedor).
 - El modelo solo **pide** herramientas, y únicamente existen las que definimos: todas de solo lectura, sin escritura ni ejecución arbitraria.
 - Descartado por ahora: usar un agente ya hecho dentro del contenedor (Codex app-server, opencode o Claude Agent SDK). Son más pesados, traen herramientas de escritura que habría que desactivar, la salida no es nuestro formato y algunos tiran hacia su propio proveedor.
 
@@ -315,7 +327,8 @@ Entre procesos, el desacople ya lo dan la cola, los ficheros montados y `@otter/
 2. **v1:** mirror + worktree + contenedor revisor + linters + agente con herramientas de solo lectura + contexto dinámico (paso 3).
    - ✅ Plan 1: mirror + worktree, diff de git (sin el límite de la API), contexto dinámico, limpieza al cerrar el PR.
    - ✅ Plan 3: contenedor revisor aislado (stdin/stdout, salida validada, solo variables `LLM_*`).
-   - Pendiente: agente con herramientas, linters y SAST, red restringida y gateway.
+   - ✅ Plan 4: agente con herramientas de solo lectura (`read_file`, `grep`, `find_files`) en el revisor y en el verificador. Sin git log/blame (haría falta montar el mirror) ni ast-grep.
+   - Pendiente: linters y SAST, red restringida y gateway.
 3. **v2:** revisión incremental completa, endpoints admin, barrendero, comandos `@otter`.
 
 ## 13. Pendiente de verificar

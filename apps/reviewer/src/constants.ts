@@ -10,8 +10,18 @@ export const MAX_DESCRIPTION_CHARS = 4_000; // the description is untrusted: it 
 
 export const RISKS = ["low", "medium", "high"] as const;
 
-/** Per LLM call: a hung provider fails the attempt (and Graphile retries) instead of blocking the worker forever. */
+/** Per LLM step: a hung provider fails the attempt (and Graphile retries) instead of blocking the worker forever. */
 export const LLM_TIMEOUT_MS = 250_000;
+/** Per generate call, tool loop included: review + verify stay under the worker's 15 min container timeout. */
+export const LLM_TOTAL_TIMEOUT_MS = 6 * 60_000;
+
+/** Read-only repo tools (ARCHITECTURE.md §5): each step is one more LLM call, so they are capped. */
+export const TOOL_MAX_STEPS = 10;
+export const READ_FILE_MAX_LINES = 300;
+export const GREP_MAX_MATCHES = 50;
+export const FIND_MAX_RESULTS = 200;
+export const TOOL_LINE_MAX_CHARS = 300;
+export const GREP_TIMEOUT_MS = 10_000;
 
 /** Values of LLM_REASONING, passed as the AI SDK's provider-agnostic `reasoning` option. */
 export const LLM_REASONING_LEVELS = [

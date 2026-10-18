@@ -2,7 +2,7 @@ FROM node:24-alpine
 ARG APP
 RUN case "$APP" in \
       worker) apk add --no-cache git docker-cli ;; \
-      reviewer) apk add --no-cache git ;; \
+      reviewer) apk add --no-cache git ripgrep ;; \
     esac
 WORKDIR /app
 COPY package.json package-lock.json .npmrc tsconfig.base.json tsconfig.json ./

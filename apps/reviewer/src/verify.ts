@@ -1,4 +1,5 @@
 import type { Finding } from "@otter/contracts";
+import type { ToolSet } from "ai";
 import { z } from "zod";
 import type { LlmProvider } from "./llm.js";
 import { VERIFY_SYSTEM_PROMPT } from "./prompts/verify.js";
@@ -12,6 +13,7 @@ export async function verify(
   llm: LlmProvider,
   chunk: string,
   findings: Finding[],
+  tools?: ToolSet,
 ): Promise<Finding[]> {
   const listed = findings.map(
     ({ path, startLine, line, severity, body, suggestion }, index) => ({
@@ -28,6 +30,7 @@ export async function verify(
     system: VERIFY_SYSTEM_PROMPT,
     prompt: `<untrusted>\n${chunk}\n\n## Findings\n${JSON.stringify(listed, null, 2)}\n</untrusted>`,
     schema: scoresSchema,
+    tools,
   });
   const byIndex = new Map(scores.map((s) => [s.index, s.score]));
   return findings.map((f, i) => ({

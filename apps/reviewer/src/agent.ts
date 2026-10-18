@@ -1,5 +1,6 @@
 import { matchesGlob } from "node:path";
 import type { Finding, ReviewerInput, ReviewerOutput } from "@otter/contracts";
+import type { ToolSet } from "ai";
 import { z } from "zod";
 import {
   MAX_DESCRIPTION_CHARS,
@@ -15,6 +16,7 @@ import { chunkDiff, countTokens } from "./diff.js";
 import { repoFileReader } from "./files.js";
 import type { LlmProvider } from "./llm.js";
 import { reviewSystemPrompt } from "./prompts/review.js";
+import { repoTools } from "./tools.js";
 import type { Chunk } from "./types.js";
 import { filterByConfidence, verify } from "./verify.js";
 
@@ -65,6 +67,7 @@ export async function review(
     ignore: config.ignore,
     readLines: input.repoDir ? repoFileReader(input.repoDir) : undefined,
   });
+  const tools = input.repoDir ? repoTools(input.repoDir) : undefined;
   const context = [
     deleted.length ? `## Deleted files\n${deleted.join("\n")}` : "",
     filtered.length ? `## Skipped by filter\n${filtered.join("\n")}` : "",
@@ -84,6 +87,7 @@ export async function review(
         ),
         prompt: `<untrusted>\n${header}\n\n${context}\n\n# Diff\n${chunk.text}\n</untrusted>`,
         schema: reviewSchema,
+        tools,
       });
       const findings: Finding[] = out.findings
         .slice(0, REVIEW_MAX_FINDINGS)
@@ -100,6 +104,7 @@ export async function review(
           chunk,
           findings,
           opts.finalAttempt ?? true,
+          tools,
         ),
       };
     }),
@@ -129,11 +134,12 @@ async function verifyChunk(
   chunk: Chunk,
   findings: Finding[],
   finalAttempt: boolean,
+  tools: ToolSet | undefined,
 ): Promise<Finding[]> {
   if (!findings.length) return [];
   try {
     return filterByConfidence(
-      await verify(llm, chunk.text, findings),
+      await verify(llm, chunk.text, findings, tools),
       REVIEW_MIN_SCORE / 10,
     );
   } catch (err) {

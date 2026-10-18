@@ -2,18 +2,35 @@
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createGoogle } from "@ai-sdk/google";
 import { createOpenAI } from "@ai-sdk/openai";
-import { generateText, Output, type LanguageModel } from "ai";
+import {
+  generateText,
+  hasToolCall,
+  Output,
+  stepCountIs,
+  tool,
+  type LanguageModel,
+  type ToolSet,
+} from "ai";
 import type { z } from "zod";
-import { LLM_REASONING_LEVELS, LLM_TIMEOUT_MS } from "./constants.js";
+import {
+  LLM_REASONING_LEVELS,
+  LLM_TIMEOUT_MS,
+  LLM_TOTAL_TIMEOUT_MS,
+  TOOL_MAX_STEPS,
+} from "./constants.js";
 
 export interface LlmProvider {
-  /** One structured-output call: the result is already validated against `schema`. */
   generate<T>(req: {
     system: string;
     prompt: string;
     schema: z.ZodType<T>;
+    tools?: ToolSet;
   }): Promise<T>;
 }
+
+const SUBMIT_TOOL = "submit";
+const SUBMIT_DESCRIPTION =
+  "Submit your final answer. Call it exactly once, when you are done.";
 
 export const PROVIDERS = ["anthropic", "openai", "gemini"] as const;
 export type ProviderName = (typeof PROVIDERS)[number];
@@ -51,17 +68,47 @@ export function createLlm(
       ? createOpenAI(settings).chat(env.LLM_MODEL)
       : factory(settings)(env.LLM_MODEL);
 
+  const common = {
+    model,
+    reasoning,
+    timeout: { stepMs: LLM_TIMEOUT_MS, totalMs: LLM_TOTAL_TIMEOUT_MS },
+  };
+
   return {
-    async generate({ system, prompt, schema }) {
-      const { output } = await generateText({
-        model,
+    async generate({ system, prompt, schema, tools }) {
+      if (!tools) {
+        const { output } = await generateText({
+          ...common,
+          instructions: system,
+          prompt,
+          output: Output.object({ schema }),
+        });
+        return output;
+      }
+      const { steps } = await generateText({
+        ...common,
         instructions: system,
         prompt,
-        reasoning,
-        timeout: LLM_TIMEOUT_MS,
-        output: Output.object({ schema }),
+        tools: {
+          ...tools,
+          [SUBMIT_TOOL]: tool({
+            description: SUBMIT_DESCRIPTION,
+            inputSchema: schema,
+          }),
+        },
+        toolChoice: "required",
+        stopWhen: [stepCountIs(TOOL_MAX_STEPS + 1), hasToolCall(SUBMIT_TOOL)],
+        prepareStep: ({ stepNumber }) =>
+          stepNumber === TOOL_MAX_STEPS
+            ? { activeTools: [SUBMIT_TOOL] }
+            : undefined,
       });
-      return output;
+      const submitted = steps
+        .flatMap((s) => s.toolCalls)
+        .find((c) => c.toolName === SUBMIT_TOOL);
+      if (!submitted)
+        throw new Error("the model ended without submitting its answer");
+      return schema.parse(submitted.input);
     },
   };
 }
