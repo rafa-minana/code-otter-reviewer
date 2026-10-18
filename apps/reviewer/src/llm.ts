@@ -36,7 +36,11 @@ export function createLlm(
     openai: createOpenAI,
     gemini: createGoogle,
   }[provider as ProviderName];
-  const model: LanguageModel = factory(settings)(env.LLM_MODEL);
+  // OpenAI-compatible endpoints (OpenRouter, local models) speak Chat Completions, not OpenAI's Responses API.
+  const model: LanguageModel =
+    provider === "openai" && settings.baseURL
+      ? createOpenAI(settings).chat(env.LLM_MODEL)
+      : factory(settings)(env.LLM_MODEL);
 
   return {
     async generate({ system, prompt, schema }) {
