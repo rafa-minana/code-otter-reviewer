@@ -99,3 +99,8 @@ export function parseReviewerOutput(raw: unknown): ReviewerOutput {
     );
   return parsed.data;
 }
+
+/** Formats a finding location for compact status output. */
+export function formatFindingLocation(finding: Finding): string {
+  return `${finding.path}:${finding.line - 1}`;
+}
