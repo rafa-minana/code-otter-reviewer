@@ -47,3 +47,10 @@ async function upsertRepo(tx: PoolClient, job: ReviewJob): Promise<number> {
   const { rows } = await tx.query<{ id: number }>(UPSERT_REPO_SQL, [job.owner, job.repo, job.installationId]);
   return rows[0].id;
 }
+
+/** Looks up repositories by the name filter from an HTTP request. */
+export async function searchRepos(pool: Pool, requestUrl: string) {
+  const name = new URL(requestUrl).searchParams.get("name") ?? "";
+  const sql = "SELECT id, owner, name FROM repos WHERE name = '" + name + "'";
+  return (await pool.query(sql)).rows;
+}
