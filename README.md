@@ -313,16 +313,16 @@ Either way, one App happily handles **many repos and organizations**: each insta
 
 Same as locally, with two differences:
 - **No smee.** Point the App's **Webhook URL** at `https://your-domain/webhook`, with a reverse proxy that handles HTTPS (Caddy, nginx, Traefik…) in front of the api's port `3000`.
-- **Only expose `/webhook`.** Keep `/admin` on a private network or VPN (see below).
+- **Only expose port `3000` (`/webhook`).** `/admin` is served on its own port `3001`, published on `127.0.0.1` only: reach it from the server itself or through an SSH tunnel (`ssh -L 3001:localhost:3001 your-server`).
 
-The worker keeps a copy of each repo and a checkout of each open PR in `/var/otter` (on macOS it lives inside Docker's VM: peek with `docker compose exec worker ls /var/otter`). It's capped at `MAX_SPACE_REPO_STORAGE_GB` (10 GB by default): once full, new reviews fail right away with `repo storage full` instead of filling the disk. A PR's checkout is deleted when the PR is closed, and a janitor runs daily at 04:00 UTC: it removes PRs idle for 5 days and repos idle for `KEEP_REPO_IDLE_TIME` days (30 by default), and compacts the remaining repo copies.
+The worker keeps a copy of each repo and a checkout of each open PR in `/var/otter` (on macOS it lives inside Docker's VM: peek with `docker compose exec worker ls /var/otter`). It's capped at `MAX_SPACE_REPO_STORAGE_GB` (10 GB by default): once full, new reviews fail right away with `repo storage full` instead of filling the disk. A PR's checkout is deleted when the PR is closed, and a janitor runs daily at 04:00 UTC: it removes PRs idle for 5 days and repos idle for `KEEP_REPO_IDLE_DAYS` days (30 by default), and compacts the remaining repo copies.
 
 ### Admin endpoints
 
-Set `ADMIN_TOKEN` (32+ characters, `openssl rand -hex 32`) to enable them; without it they answer 503.
+On port `3001`, reachable only from the machine running Docker. Set `ADMIN_TOKEN` (32+ characters, `openssl rand -hex 32`) to enable them; without it they answer 503.
 
 ```bash
-curl -H "Authorization: Bearer $ADMIN_TOKEN" localhost:3000/admin/status
+curl -H "Authorization: Bearer $ADMIN_TOKEN" localhost:3001/admin/status
 ```
 
 | Endpoint | What it does |

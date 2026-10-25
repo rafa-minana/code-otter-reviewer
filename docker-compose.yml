@@ -18,7 +18,8 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgres://otter:${POSTGRES_PASSWORD:-otter}@postgres:5432/otter}
       LLM_API_KEY: "" # the real key lives only in the gateway
-    ports: ["3000:3000"]
+    # /admin has its own port, reachable only from this machine (ssh -L 3001:localhost:3001 on a server)
+    ports: ["3000:3000", "127.0.0.1:3001:3001"]
     depends_on: { postgres: { condition: service_healthy } }
 
   worker:

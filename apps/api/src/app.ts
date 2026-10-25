@@ -5,9 +5,14 @@ import { webhookRoutes, type WebhookDeps } from "./routes/webhook.js";
 
 export type AppDeps = WebhookDeps & AdminDeps;
 
-export function createApp(deps: AppDeps): Hono {
+/** Public port: only what GitHub needs. */
+export function createApp(deps: WebhookDeps): Hono {
   return new Hono()
     .get("/health", (c) => c.text("ok", HTTP_STATUS.ok))
-    .route("/webhook", webhookRoutes(deps))
-    .route("/admin", adminRoutes(deps));
+    .route("/webhook", webhookRoutes(deps));
+}
+
+/** Its own port, published on 127.0.0.1 only: /admin never shares the webhook's public port. */
+export function createAdminApp(deps: AdminDeps): Hono {
+  return new Hono().route("/admin", adminRoutes(deps));
 }

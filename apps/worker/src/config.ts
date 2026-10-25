@@ -67,8 +67,8 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
         DEFAULT_MAX_STORAGE_GB,
       ) * GB,
     repoIdleDays: positiveInt(
-      "KEEP_REPO_IDLE_TIME",
-      env.KEEP_REPO_IDLE_TIME,
+      "KEEP_REPO_IDLE_DAYS",
+      env.KEEP_REPO_IDLE_DAYS,
       DEFAULT_REPO_IDLE_DAYS,
     ),
     appId: GITHUB_APP_ID,

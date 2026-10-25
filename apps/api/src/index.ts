@@ -1,7 +1,7 @@
 import { serve } from "@hono/node-server";
 import { runMigrations } from "graphile-worker";
 import pg from "pg";
-import { createApp } from "./app.js";
+import { createAdminApp, createApp, type AppDeps } from "./app.js";
 import { loadConfig } from "./config.js";
 import { adminStatus, pullRequestState } from "./db/admin-queries.js";
 import {
@@ -19,7 +19,7 @@ await runMigrations({ connectionString: config.databaseUrl });
 
 const pool = new pg.Pool({ connectionString: config.databaseUrl });
 
-const app = createApp({
+const deps: AppDeps = {
   webhookSecret: config.webhookSecret,
   enqueueReview: (job, delaySeconds) => enqueueReview(pool, job, delaySeconds),
   enqueueCleanup: (job) => enqueueCleanup(pool, job),
@@ -29,8 +29,11 @@ const app = createApp({
   rereview: (pr) => enqueueRereview(pool, pr),
   enqueueRepoCleanup: (job) => enqueueRepoCleanup(pool, job),
   enqueueJanitor: () => enqueueJanitor(pool),
-});
+};
 
-serve({ fetch: app.fetch, port: config.port }, ({ port }) =>
+serve({ fetch: createApp(deps).fetch, port: config.port }, ({ port }) =>
   console.log(`api listening on :${port}`),
+);
+serve({ fetch: createAdminApp(deps).fetch, port: config.adminPort }, ({ port }) =>
+  console.log(`admin listening on :${port}`),
 );

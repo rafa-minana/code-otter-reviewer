@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import type { CleanupJob, ReviewJob } from "@otter/contracts";
-import { createApp, type AppDeps } from "./app.js";
+import { createAdminApp, createApp, type AppDeps } from "./app.js";
 import { MAX_BODY_BYTES } from "./constraints/constraints.js";
 import { EXPECTED_JOB, prPayload } from "./fixtures.js";
 
@@ -29,6 +29,7 @@ const deps: AppDeps = {
   enqueueJanitor: async () => void janitorRuns++,
 };
 const app = createApp(deps);
+const adminApp = createAdminApp(deps);
 
 const signatureOf = (body: string) =>
   `sha256=${createHmac("sha256", SECRET).update(body).digest("hex")}`;
@@ -78,17 +79,25 @@ test("a closed PR enqueues its cleanup", async () => {
 });
 
 const admin = (path: string, method = "GET", token = ADMIN_TOKEN) =>
-  app.request(`/admin${path}`, {
+  adminApp.request(`/admin${path}`, {
     method,
     headers: { authorization: `Bearer ${token}` },
   });
 
 test("admin needs ADMIN_TOKEN, and is off without one", async () => {
-  assert.equal((await app.request("/admin/status")).status, 401);
+  assert.equal((await adminApp.request("/admin/status")).status, 401);
   assert.equal((await admin("/status", "GET", "b".repeat(32))).status, 401);
   assert.equal((await admin("/status")).status, 200);
-  const off = createApp({ ...deps, adminToken: undefined });
+  const off = createAdminApp({ ...deps, adminToken: undefined });
   assert.equal((await off.request("/admin/status")).status, 503);
+});
+
+test("the public port doesn't serve /admin", async () => {
+  assert.equal((await admin("/status")).status, 200);
+  const res = await app.request("/admin/status", {
+    headers: { authorization: `Bearer ${ADMIN_TOKEN}` },
+  });
+  assert.equal(res.status, 404);
 });
 
 test("admin rejects names and numbers that could escape a path", async () => {

@@ -21,6 +21,6 @@ test("storage quota and repo idle time default to 10 GB and 30 days, and reject 
   assert.equal(config.repoIdleDays, 30);
   assert.equal(loadConfig({ ...ENV, MAX_SPACE_REPO_STORAGE_GB: "0.5" }).maxStorageBytes, 0.5 * 1024 ** 3);
   assert.throws(() => loadConfig({ ...ENV, MAX_SPACE_REPO_STORAGE_GB: "0" }), /MAX_SPACE_REPO_STORAGE_GB/);
-  assert.throws(() => loadConfig({ ...ENV, KEEP_REPO_IDLE_TIME: "1.5" }), /KEEP_REPO_IDLE_TIME must be a positive integer/);
+  assert.throws(() => loadConfig({ ...ENV, KEEP_REPO_IDLE_DAYS: "1.5" }), /KEEP_REPO_IDLE_DAYS must be a positive integer/);
   assert.throws(() => loadConfig({ ...ENV, WORKER_CONCURRENCY: "abc" }), /WORKER_CONCURRENCY/);
 });

@@ -4,7 +4,7 @@ import { run } from "graphile-worker";
 import { handleCleanup } from "./cleanup.js";
 import { loadConfig } from "./config.js";
 import { octokitClient } from "./github.js";
-import { janitorHandler } from "./janitor.js";
+import { handleJanitor } from "./janitor.js";
 import {
   dockerRunner,
   ensureReviewerImage,
@@ -36,7 +36,7 @@ await run({
       handleReview(deps, payload as ReviewJob, helpers),
     [TASKS.cleanup]: (payload, helpers) =>
       handleCleanup(deps, payload as CleanupJob, helpers),
-    [TASKS.janitor]: (_payload, helpers) => janitorHandler(deps, helpers),
+    [TASKS.janitor]: (_payload, helpers) => handleJanitor(deps, helpers),
   },
 });
 console.log("worker started");

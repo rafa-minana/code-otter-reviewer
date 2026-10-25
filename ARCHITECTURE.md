@@ -34,7 +34,7 @@ pull_request.closed / caducidad 5 días / endpoint admin ──► job cleanup �
 | Worker → GitHub (API y `git fetch`) | GitHub App: con la `.pem` firma un JWT de la App y lo cambia por un **token de instalación** (`installationId` del webhook) que caduca en 1 h y solo vale para los repos instalados. Lo hace `@octokit/auth-app`, que además lo cachea. Para git va en variables de entorno, nunca en argumentos | `GITHUB_APP_ID` + `GITHUB_PRIVATE_KEY` (el worker) |
 | Revisor → gateway | Token firmado por revisión (`otter.<id>.<caducidad>.<HMAC>`), de 20 min, en la cabecera donde iría la clave del LLM (§5) | `GATEWAY_SECRET` (el worker y el gateway) |
 | Gateway → proveedor del LLM | La clave real | `LLM_API_KEY` (el gateway) |
-| Operador → api (`/admin`) | `Authorization: Bearer`, comprobado con `hono/bearer-auth` en tiempo constante. Sin usuarios ni roles: quien tiene el token puede hacerlo todo, así que solo debe exponerse en red interna o VPN (§9) | `ADMIN_TOKEN`, de 32 o más caracteres (la api) |
+| Operador → api (`/admin`) | `Authorization: Bearer`, comprobado con `hono/bearer-auth` en tiempo constante. Sin usuarios ni roles: quien tiene el token puede hacerlo todo, por eso va en su propio puerto, publicado solo en `127.0.0.1` (§9) | `ADMIN_TOKEN`, de 32 o más caracteres (la api) |
 
 ## 2. Servicios (`docker-compose.yml`)
 
@@ -334,7 +334,7 @@ Una sola función `cleanupPr()` (y `cleanupRepo()`), usada por el evento de cier
 - **Cierre del PR (hecho en v1, plan 1):** en una transacción, la api marca el PR como `closed`, quita su revisión pendiente (`graphile_worker.remove_job`) y encola `cleanup`. El worker, con el lock del repo, borra los worktrees y `refs/otter/pr<n>`. Las filas de la BD se quedan, porque borrarlas a mitad de una revisión haría fallar el `INSERT` de sus hallazgos; las borrará el barrendero.
 - **Barrendero (janitor, hecho en v2):** se ejecuta cada día a las 04:00 UTC con el `crontab` de Graphile, o con `POST /admin/gc`. Hace tres cosas, y un fallo en un elemento no para el resto:
   1. Borra los PRs caducados (`expires_at`, 5 días desde el último webhook): sus worktrees, su ref y sus filas.
-  2. Borra los repos sin webhooks en `KEEP_REPO_IDLE_TIME` días (30 por defecto): los worktrees, el mirror y las filas.
+  2. Borra los repos sin webhooks en `KEEP_REPO_IDLE_DAYS` días (30 por defecto): los worktrees, el mirror y las filas.
   3. Compacta los mirrors que quedan con `git gc --prune=now`.
 
   Todo se hace con el lock del repo. Las filas se borran con un `DELETE` condicionado (que siga caducado y sin revisión en curso), en la misma transacción que los ficheros: si git falla, la fila vuelve y el siguiente pase lo reintenta. Si llega un push a un PR ya limpiado, se recrea todo, porque solo era caché.
@@ -344,7 +344,7 @@ Una sola función `cleanupPr()` (y `cleanupRepo()`), usada por el evento de cier
 
 ## 9. Endpoints de administración
 
-Protegidos con `Authorization: Bearer $ADMIN_TOKEN` (`hono/bearer-auth`, 32+ caracteres; sin token responden 503). Exponerlos solo en red interna o VPN. `owner`/`repo` se validan con la misma regla que el webhook, porque acaban en rutas que se borran.
+Servidos en su propio puerto (`3001`, `ADMIN_PORT`), que el compose publica solo en `127.0.0.1`: el puerto público `3000` solo sirve `/health` y `/webhook`. En un servidor se llega con un túnel SSH. Pendiente: un reverse proxy delante (HTTPS y solo `/webhook` hacia fuera). Protegidos con `Authorization: Bearer $ADMIN_TOKEN` (`hono/bearer-auth`, 32+ caracteres; sin token responden 503). `owner`/`repo` se validan con la misma regla que el webhook, porque acaban en rutas que se borran.
 
 ```
 GET    /admin/status                               # colas, revisiones en curso, uso de disco

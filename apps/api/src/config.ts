@@ -1,10 +1,12 @@
 const DEFAULT_PORT = 3000;
+const DEFAULT_ADMIN_PORT = 3001;
 const ADMIN_TOKEN_MIN_LENGTH = 32;
 
 export interface Config {
   webhookSecret: string;
   databaseUrl: string;
   port: number;
+  adminPort: number;
   /** Unset: /admin is disabled. */
   adminToken?: string;
 }
@@ -18,6 +20,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     webhookSecret,
     databaseUrl,
     port: Number(env.PORT ?? DEFAULT_PORT),
+    adminPort: Number(env.ADMIN_PORT ?? DEFAULT_ADMIN_PORT),
     adminToken: adminToken(env.ADMIN_TOKEN),
   };
 }

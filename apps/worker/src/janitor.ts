@@ -41,10 +41,10 @@ interface Row {
 }
 
 /**
- * Periodic job (and POST /admin/gc): drops PRs idle for 5 days and repos idle for KEEP_REPO_IDLE_TIME
+ * Periodic job (and POST /admin/gc): drops PRs idle for 5 days and repos idle for KEEP_REPO_IDLE_DAYS
  * days, files and rows, then compacts the remaining mirrors. One failing item never stops the rest.
  */
-export async function janitorHandler(
+export async function handleJanitor(
   deps: { git: GitEnv; repoIdleDays: number },
   helpers: JobHelpers,
 ): Promise<void> {
