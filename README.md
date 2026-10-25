@@ -313,9 +313,26 @@ Either way, one App happily handles **many repos and organizations**: each insta
 
 Same as locally, with two differences:
 - **No smee.** Point the App's **Webhook URL** at `https://your-domain/webhook`, with a reverse proxy that handles HTTPS (Caddy, nginx, Traefik…) in front of the api's port `3000`.
-- **Only expose `/webhook`.** The `/admin` endpoints aren't built yet, and when they arrive they should stay on a private network.
+- **Only expose `/webhook`.** Keep `/admin` on a private network or VPN (see below).
 
-The worker keeps a copy of each repo and a checkout of each open PR in `/var/otter` (on macOS it lives inside Docker's VM: peek with `docker compose exec worker ls /var/otter`). Make sure the server has disk for your repos. A PR's checkout is deleted when the PR is closed.
+The worker keeps a copy of each repo and a checkout of each open PR in `/var/otter` (on macOS it lives inside Docker's VM: peek with `docker compose exec worker ls /var/otter`). It's capped at `MAX_SPACE_REPO_STORAGE_GB` (10 GB by default): once full, new reviews fail right away with `repo storage full` instead of filling the disk. A PR's checkout is deleted when the PR is closed, and a janitor runs daily at 04:00 UTC: it removes PRs idle for 5 days and repos idle for `KEEP_REPO_IDLE_TIME` days (30 by default), and compacts the remaining repo copies.
+
+### Admin endpoints
+
+Set `ADMIN_TOKEN` (32+ characters, `openssl rand -hex 32`) to enable them; without it they answer 503.
+
+```bash
+curl -H "Authorization: Bearer $ADMIN_TOKEN" localhost:3000/admin/status
+```
+
+| Endpoint | What it does |
+|---|---|
+| `GET /admin/status` | Jobs per task (queued, running, failed) and the reviews in progress |
+| `GET /admin/repos/:owner/:repo/pulls/:n` | The PR, its reviews (status and error) and any queued review |
+| `POST /admin/repos/:owner/:repo/pulls/:n/review` | Re-reviews the last reviewed commit (202). 409 if a review is running or queued, or the PR is closed |
+| `DELETE /admin/repos/:owner/:repo/pulls/:n` | Cleans up the PR's checkout (202) |
+| `DELETE /admin/repos/:owner/:repo` | Removes the repo's copy, checkouts and history (202) |
+| `POST /admin/gc` | Runs the janitor now (202) |
 
 Heads-up: the worker mounts `/var/run/docker.sock` to launch a sandboxed container for each review (no GitHub token, read-only code, no privileges). Access to the Docker socket is effectively root on the host, so keep that in mind on a shared server.
 
@@ -340,7 +357,7 @@ Heads-up: the worker mounts `/var/run/docker.sock` to launch a sandboxed contain
 - **Code suggestions are plain code blocks,** not GitHub's one-click *suggested changes*.
 - **Rare double post:** if the worker crashes right after posting a review but before saving it, the retry posts it again.
 
-Coming next: incremental reviews, admin tools and automatic clean-up (v2). See [ARCHITECTURE.md](ARCHITECTURE.md).
+Coming next: incremental reviews and `@otter` commands (v2). See [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
 
@@ -360,6 +377,8 @@ Coming next: incremental reviews, admin tools and automatic clean-up (v2). See [
 | The worker won't start: `reviewer network "…" must exist and be internal` | Start everything with `docker compose up`, which creates the `otter-reviewers` network. If your `.env` still has `REVIEWER_NETWORK=bridge` from an older version, change it to `otter-reviewers` |
 | `GATEWAY_SECRET must be at least 32 characters` | Add it to `.env`: `openssl rand -hex 32` |
 | A review fails with `otter gateway: review budget exhausted` | The review hit its spending cap. Huge PRs may need more: raise `GATEWAY_REVIEW_MAX_REQUESTS` or `GATEWAY_REVIEW_MAX_TOKENS` |
+| Reviews fail with `repo storage full` | `/var/otter` reached `MAX_SPACE_REPO_STORAGE_GB`. Run the janitor (`POST /admin/gc`), remove a repo (`DELETE /admin/repos/:owner/:repo`) or raise the quota, then re-review (`POST …/pulls/:n/review`) |
+| The api won't start: `ADMIN_TOKEN must be at least 32 characters` | Generate one with `openssl rand -hex 32`, or leave it empty to disable `/admin` |
 | Reviews fail with `otter gateway: daily token limit reached` | `GATEWAY_DAILY_MAX_TOKENS` was reached; it resets at 00:00 UTC (or when the gateway restarts) |
 | `invalid .otter.yaml` in the logs | The `.otter.yaml` on the base branch has a typo or an unknown field |
 

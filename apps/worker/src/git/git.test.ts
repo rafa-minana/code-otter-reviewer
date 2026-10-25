@@ -6,10 +6,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseDiff } from "@otter/reviewer/diff.js";
-import { cleanupPr } from "../cleanup.js";
+import { cleanupPr, cleanupRepo } from "../cleanup.js";
 import { prDiff } from "./diff.js";
 import { ensureMirror, fetchPr, mirrorPath, prRef } from "./mirror.js";
 import { git, type GitEnv } from "./run.js";
+import { assertStorage, DiskFullError, isDiskFull } from "./storage.js";
 import { addWorktree } from "./worktree.js";
 
 // Integration tests against a local "GitHub": a repo at <tmp>/acme/app.git served over file://
@@ -133,4 +134,22 @@ test("cleanupPr removes the PR's worktrees and ref, and keeps the mirror", async
   );
   assert.ok(existsSync(join(mirror, "HEAD")));
   await cleanupPr(env, "acme", "app", 1); // idempotent: a redelivered close event is fine
+});
+
+test("cleanupRepo removes the mirror and every worktree, and a new review recreates them", async () => {
+  await addWorktree(env, "acme", "app", 1, firstSha);
+  await cleanupRepo(env, "acme", "app");
+  assert.ok(!existsSync(mirrorPath(env, "acme", "app")));
+  assert.ok(!existsSync(join(env.dataDir, "worktrees", "acme", "app")));
+  await cleanupRepo(env, "acme", "app"); // idempotent
+  await ensureMirror(env, "acme", "app");
+  assert.ok(existsSync(join(mirrorPath(env, "acme", "app"), "HEAD")));
+});
+
+test("assertStorage aborts over the quota; git's ENOSPC counts as disk full too", async () => {
+  await assertStorage(env.dataDir, 1024 ** 3);
+  await assert.rejects(assertStorage(env.dataDir, 1), DiskFullError);
+  await assertStorage(join(tmp, "missing"), 1); // nothing cloned yet: 0 bytes used
+  assert.ok(isDiskFull(new Error("git fetch failed: fatal: write error: No space left on device")));
+  assert.ok(!isDiskFull(new Error("git fetch failed: repository not found")));
 });

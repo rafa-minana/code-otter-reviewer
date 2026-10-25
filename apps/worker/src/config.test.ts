@@ -14,3 +14,13 @@ test("without a long enough GATEWAY_SECRET the worker does not start", () => {
   assert.throws(() => loadConfig({ ...ENV, GATEWAY_SECRET: undefined }), /GATEWAY_SECRET must be at least 32/);
   assert.throws(() => loadConfig({ ...ENV, GATEWAY_SECRET: "short" }), /GATEWAY_SECRET/);
 });
+
+test("storage quota and repo idle time default to 10 GB and 30 days, and reject nonsense", () => {
+  const config = loadConfig(ENV);
+  assert.equal(config.maxStorageBytes, 10 * 1024 ** 3);
+  assert.equal(config.repoIdleDays, 30);
+  assert.equal(loadConfig({ ...ENV, MAX_SPACE_REPO_STORAGE_GB: "0.5" }).maxStorageBytes, 0.5 * 1024 ** 3);
+  assert.throws(() => loadConfig({ ...ENV, MAX_SPACE_REPO_STORAGE_GB: "0" }), /MAX_SPACE_REPO_STORAGE_GB/);
+  assert.throws(() => loadConfig({ ...ENV, KEEP_REPO_IDLE_TIME: "1.5" }), /KEEP_REPO_IDLE_TIME must be a positive integer/);
+  assert.throws(() => loadConfig({ ...ENV, WORKER_CONCURRENCY: "abc" }), /WORKER_CONCURRENCY/);
+});

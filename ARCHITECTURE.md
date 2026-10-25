@@ -26,6 +26,16 @@ GitHub ──webhook──► [api] ──addJob(review, jobKey=PR, replace, +2m
 pull_request.closed / caducidad 5 días / endpoint admin ──► job cleanup ──► cleanupPr()
 ```
 
+### Quién se autentica contra quién
+
+| De → a | Cómo | Secreto (solo lo tiene…) |
+|---|---|---|
+| GitHub → api (`/webhook`) | Firma HMAC-SHA256 del cuerpo (`x-hub-signature-256`), comprobada en tiempo constante; si no cuadra, 401 | `GITHUB_WEBHOOK_SECRET` (GitHub y la api) |
+| Worker → GitHub (API y `git fetch`) | GitHub App: con la `.pem` firma un JWT de la App y lo cambia por un **token de instalación** (`installationId` del webhook) que caduca en 1 h y solo vale para los repos instalados. Lo hace `@octokit/auth-app`, que además lo cachea. Para git va en variables de entorno, nunca en argumentos | `GITHUB_APP_ID` + `GITHUB_PRIVATE_KEY` (el worker) |
+| Revisor → gateway | Token firmado por revisión (`otter.<id>.<caducidad>.<HMAC>`), de 20 min, en la cabecera donde iría la clave del LLM (§5) | `GATEWAY_SECRET` (el worker y el gateway) |
+| Gateway → proveedor del LLM | La clave real | `LLM_API_KEY` (el gateway) |
+| Operador → api (`/admin`) | `Authorization: Bearer`, comprobado con `hono/bearer-auth` en tiempo constante. Sin usuarios ni roles: quien tiene el token puede hacerlo todo, así que solo debe exponerse en red interna o VPN (§9) | `ADMIN_TOKEN`, de 32 o más caracteres (la api) |
+
 ## 2. Servicios (`docker-compose.yml`)
 
 | Servicio | Función | Notas |
@@ -290,9 +300,27 @@ Proxy propio (Hono, sin LiteLLM): la única salida de los revisores y el único 
 |---|---|
 | `repos` | owner/repo, ruta del mirror, último uso |
 | `pull_requests` | repo, número, estado, último SHA revisado, fecha de caducidad |
-| `reviews` | PR, SHA, inicio y fin, resultado, id de la review en GitHub |
+| `reviews` | PR, SHA, estado, error, job de Graphile, inicio y fin, id de la review en GitHub |
 | `findings` | review, fichero, línea, severidad, texto, publicado |
 | `graphile_worker.*` | Cola de trabajos (la crea la librería) |
+
+### Estado de la revisión (hecho en v2)
+
+Cada fila de `reviews` es una petición procesada. La máquina de estados vive en un solo fichero, `packages/contracts/src/review-status.ts`, que comparten la api y el worker:
+
+```
+(en cola: solo un job en Graphile, sin fila)
+        │ el worker la reclama (INSERT, job_id = id del job)
+        ▼
+     running ──► published | stale | failed (con error)
+published | stale | failed ──► cancelled   (solo el admin, al forzar la re-revisión)
+```
+
+- **La BD obedece a la máquina:** cada `UPDATE` de estado lleva `WHERE status = ANY(sourcesOf(to))`, así que una transición ilegal no toca ninguna fila.
+- **Una sola revisión activa por SHA:** índice único parcial `(pull_request_id, sha) WHERE status <> 'cancelled'`. Las canceladas quedan como historial, con sus hallazgos.
+- **Solo el mismo job reclama una fila `running`:** son sus reintentos tras un fallo o un crash. Otro job con el mismo SHA se salta, así que con `WORKER_CONCURRENCY > 1` no hay revisiones dobles.
+- **"En curso"** (`activeReviewSql`) significa `running` y que su job todavía pueda ejecutarla. Una fila `running` sin job (por ejemplo, el PR se cerró entre reintentos) es huérfana: no bloquea al barrendero, y la re-revisión la marca `failed` antes de cancelarla.
+- **Disco lleno:** si `/var/otter` llega a `MAX_SPACE_REPO_STORAGE_GB` (10 por defecto, medido con `du` antes del checkout) o git falla con ENOSPC, la revisión pasa a `failed` con el error y no se reintenta.
 
 ## 8. Limpieza
 
@@ -304,13 +332,19 @@ Una sola función `cleanupPr()` (y `cleanupRepo()`), usada por el evento de cier
 | Repo | todo lo anterior para todos sus PRs, el mirror y la caché de deps | — |
 
 - **Cierre del PR (hecho en v1, plan 1):** en una transacción, la api marca el PR como `closed`, quita su revisión pendiente (`graphile_worker.remove_job`) y encola `cleanup`. El worker, con el lock del repo, borra los worktrees y `refs/otter/pr<n>`. Las filas de la BD se quedan, porque borrarlas a mitad de una revisión haría fallar el `INSERT` de sus hallazgos; las borrará el barrendero.
-- **Barrendero (janitor):** trabajo periódico que borra los PRs sin actividad en 5 días y los repos sin actividad en N días. Si llega un push a un PR ya limpiado, se recrea todo, porque solo era caché.
+- **Barrendero (janitor, hecho en v2):** se ejecuta cada día a las 04:00 UTC con el `crontab` de Graphile, o con `POST /admin/gc`. Hace tres cosas, y un fallo en un elemento no para el resto:
+  1. Borra los PRs caducados (`expires_at`, 5 días desde el último webhook): sus worktrees, su ref y sus filas.
+  2. Borra los repos sin webhooks en `KEEP_REPO_IDLE_TIME` días (30 por defecto): los worktrees, el mirror y las filas.
+  3. Compacta los mirrors que quedan con `git gc --prune=now`.
+
+  Todo se hace con el lock del repo. Las filas se borran con un `DELETE` condicionado (que siga caducado y sin revisión en curso), en la misma transacción que los ficheros: si git falla, la fila vuelve y el siguiente pase lo reintenta. Si llega un push a un PR ya limpiado, se recrea todo, porque solo era caché.
+- **Limpiar el repo entero (admin):** borra los ficheros con el lock y después la fila del repo, que arrastra en cascada sus PRs, revisiones y hallazgos. Una revisión en curso de ese repo fallará al guardar.
 - **Recursos:** los contenedores son `--rm`, así que al terminar no queda RAM ocupada. Lo que se libera es disco.
 - **Límite de concurrencia:** un máximo global de revisores simultáneos (CPU y RAM): `WORKER_CONCURRENCY`, por defecto 1. Los jobs que no caben esperan en la cola.
 
 ## 9. Endpoints de administración
 
-Protegidos con `Authorization: Bearer $ADMIN_TOKEN`. Exponerlos solo en red interna o VPN.
+Protegidos con `Authorization: Bearer $ADMIN_TOKEN` (`hono/bearer-auth`, 32+ caracteres; sin token responden 503). Exponerlos solo en red interna o VPN. `owner`/`repo` se validan con la misma regla que el webhook, porque acaban en rutas que se borran.
 
 ```
 GET    /admin/status                               # colas, revisiones en curso, uso de disco
@@ -321,7 +355,7 @@ DELETE /admin/repos/:owner/:repo                   # limpiar repo entero, mirror
 POST   /admin/gc                                   # ejecutar el barrendero ya
 ```
 
-Los DELETE son idempotentes y pasan por la cola, para no competir con una revisión en curso.
+Los DELETE y `gc` son idempotentes, pasan por la cola para no competir con una revisión en curso y responden 202. La re-revisión responde 202 si encola, 404 si el PR no existe y 409 si está cerrado, nunca se revisó, tiene una revisión en curso o ya tiene una en cola.
 
 ## 10. Estructura del repo (esqueleto creado; los módulos lanzan "not implemented")
 
@@ -395,10 +429,11 @@ Entre procesos, el desacople ya lo dan la cola, los ficheros montados y `@otter/
    - ✅ Plan 6: red interna sin internet y gateway propio con la clave, tokens firmados por revisión, rutas y modelo fijados, y presupuesto por intento y diario.
    - **v1 completo.**
 3. **v2:** revisión incremental completa, endpoints admin, barrendero, comandos `@otter`.
+   - ✅ Endpoints admin, barrendero (con `git gc` de los mirrors), estado de la revisión y cuota de disco.
 
 ## 13. Pendiente de verificar
 
-- ~~Las opciones de Graphile Worker `jobKey` y `replace`~~: verificado en la 0.18.0. `add_job` tiene `job_key_mode` y su valor por defecto es `replace`. Falta verificar cómo se eliminan trabajos por clave (v2).
+- ~~Las opciones de Graphile Worker `jobKey` y `replace`~~: verificado en la 0.18.0. `add_job` tiene `job_key_mode` y su valor por defecto es `replace`. `remove_job(key)` borra el trabajo si está pendiente; si está en curso, le quita la clave y no lo reintenta.
 - La ubicación actual del plugin code-review de Anthropic.
 - ~~Gateway de LLM~~: hecho en el plan 6 (propio, sin LiteLLM). Lo que queda:
   - **Contadores en memoria:** un reinicio del gateway pone a cero el presupuesto y el tope diario. Pasar a Postgres si hace falta un control de gasto exacto.

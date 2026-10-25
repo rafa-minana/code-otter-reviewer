@@ -9,7 +9,7 @@
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc -b",
-    "test": "tsc -b && node --test \"apps/*/dist/**/*.test.js\""
+    "test": "tsc -b && node --test \"apps/*/dist/**/*.test.js\" \"packages/*/dist/**/*.test.js\""
   },
   "devDependencies": {
     "@types/node": "26.6.5",

@@ -6,7 +6,7 @@ import { withTransaction } from "../db/transaction.js";
 const PR_INACTIVITY_TTL = "5 days";
 
 /** Each attempt repeats every LLM call: enough for a transient 429/timeout, bounded in cost. */
-const REVIEW_MAX_ATTEMPTS = 3;
+export const REVIEW_MAX_ATTEMPTS = 3;
 
 const UPSERT_REPO_SQL = `
   INSERT INTO repos (owner, name, installation_id)
@@ -24,7 +24,7 @@ const UPSERT_PULL_REQUEST_SQL = `
         expires_at = EXCLUDED.expires_at`;
 
 /** job_key_mode 'replace': a newer push swaps the pending job and restarts the debounce. */
-const ADD_JOB_SQL = `
+export const ADD_JOB_SQL = `
   SELECT graphile_worker.add_job(
     $1,
     $2::json,

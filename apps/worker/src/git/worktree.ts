@@ -4,8 +4,11 @@ import { join } from "node:path";
 import { mirrorPath } from "./mirror.js";
 import { git, type GitEnv } from "./run.js";
 
+export const repoWorktreesDir = (env: GitEnv, owner: string, repo: string) =>
+  join(env.dataDir, "worktrees", owner, repo);
+
 const prDir = (env: GitEnv, owner: string, repo: string, number: number) =>
-  join(env.dataDir, "worktrees", owner, repo, `pr${number}`);
+  join(repoWorktreesDir(env, owner, repo), `pr${number}`);
 
 /**
  * Checkout of the PR's SHA; returns its path. Reused when it already exists (a retry of the same job).

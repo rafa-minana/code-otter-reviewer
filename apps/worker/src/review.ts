@@ -1,4 +1,4 @@
-import type { Finding, ReviewJob } from "@otter/contracts";
+import { sourcesOf, type Finding, type ReviewJob } from "@otter/contracts";
 import type { JobHelpers } from "graphile-worker";
 import { parse as parseYaml } from "yaml";
 import { findingKey, isStale, parseReviewerOutput } from "./core.js";
@@ -6,6 +6,7 @@ import { prDiff } from "./git/diff.js";
 import { withRepoLock } from "./git/lock.js";
 import { ensureMirror, fetchPr } from "./git/mirror.js";
 import type { GitEnv } from "./git/run.js";
+import { assertStorage, isDiskFull } from "./git/storage.js";
 import { addWorktree } from "./git/worktree.js";
 import type { ContainerRunner, GitHubClient } from "./ports.js";
 import { publishReview } from "./publish.js";
@@ -13,25 +14,26 @@ import { publishReview } from "./publish.js";
 const CONFIG_PATH = ".otter.yaml";
 
 /**
- * Each (PR, SHA) is reviewed once (UNIQUE in `reviews`). A row left unfinished by a crashed attempt
- * is claimed again; a finished one returns no row and the job is skipped.
+ * Each (PR, SHA) is reviewed once (unique among non-cancelled rows). Only a retry of the job that
+ * claimed the row claims it again; a finished row, or one running under another job, returns no row
+ * and the job is skipped.
  */
 const CLAIM_REVIEW_SQL = `
-  INSERT INTO reviews (pull_request_id, sha)
-  SELECT pr.id, $4
+  INSERT INTO reviews (pull_request_id, sha, job_id)
+  SELECT pr.id, $4, $5
   FROM pull_requests pr JOIN repos r ON r.id = pr.repo_id
   WHERE r.owner = $1 AND r.name = $2 AND pr.number = $3
-  ON CONFLICT (pull_request_id, sha) DO UPDATE
+  ON CONFLICT (pull_request_id, sha) WHERE status <> 'cancelled' DO UPDATE
     SET started_at = now()
-    WHERE reviews.finished_at IS NULL
+    WHERE reviews.status = 'running' AND reviews.job_id = EXCLUDED.job_id
   RETURNING id`;
 
 /** One statement, so the review result, its findings and the PR's last SHA are saved atomically. */
 const FINISH_REVIEW_SQL = `
   WITH done AS (
     UPDATE reviews
-    SET finished_at = now(), result = $2::text, github_review_id = $3
-    WHERE id = $1
+    SET finished_at = now(), status = $2::text, github_review_id = $3, error = $5
+    WHERE id = $1 AND status = ANY($6::text[])
     RETURNING pull_request_id, sha
   ), saved AS (
     INSERT INTO findings (review_id, path, line, side, severity, body, published)
@@ -50,7 +52,12 @@ type Result = "published" | "stale" | "failed";
  * The review itself runs in the reviewer container (runner.ts), never in this process.
  */
 export async function handleReview(
-  deps: { gh: GitHubClient; runner: ContainerRunner; git: GitEnv },
+  deps: {
+    gh: GitHubClient;
+    runner: ContainerRunner;
+    git: GitEnv;
+    maxStorageBytes: number;
+  },
   job: ReviewJob,
   helpers: JobHelpers,
 ): Promise<void> {
@@ -63,12 +70,13 @@ export async function handleReview(
           job.repo,
           job.number,
           job.sha,
+          helpers.job.id,
         ])
       ).rows[0]?.id,
   );
   if (!reviewId) {
     helpers.logger.info(
-      `skip ${job.owner}/${job.repo}#${job.number}@${job.sha}: already reviewed or PR unknown`,
+      `skip ${job.owner}/${job.repo}#${job.number}@${job.sha}: already reviewed, running under another job, or PR unknown`,
     );
     return;
   }
@@ -76,6 +84,7 @@ export async function handleReview(
     result: Result,
     githubReviewId: number | null = null,
     findings: (Finding & { published: boolean })[] = [],
+    error: string | null = null,
   ) => {
     await helpers.withPgClient((pg) =>
       pg.query(FINISH_REVIEW_SQL, [
@@ -83,12 +92,15 @@ export async function handleReview(
         result,
         githubReviewId,
         JSON.stringify(findings),
+        error,
+        sourcesOf(result),
       ]),
     );
   };
   const finalAttempt = helpers.job.attempts >= helpers.job.max_attempts;
 
   try {
+    await assertStorage(deps.git.dataDir, deps.maxStorageBytes);
     const pr = await gh.getPullRequest(job);
     if (isStale(job.sha, pr.headSha)) return await finish("stale"); // a newer job is queued
 
@@ -132,7 +144,16 @@ export async function handleReview(
       })),
     );
   } catch (err) {
-    if (finalAttempt) await finish("failed"); // Graphile gives up after this attempt: record it
+    const error = (err as Error).message;
+    if (isDiskFull(err)) {
+      // Retrying can't free space: fail now instead of letting Graphile retry.
+      await finish("failed", null, [], error);
+      helpers.logger.error(
+        `abort ${job.owner}/${job.repo}#${job.number}@${job.sha}: ${error}`,
+      );
+      return;
+    }
+    if (finalAttempt) await finish("failed", null, [], error); // Graphile gives up after this attempt: record it
     throw err;
   }
 }

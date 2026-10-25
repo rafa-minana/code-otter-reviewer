@@ -4,6 +4,7 @@ import { run } from "graphile-worker";
 import { handleCleanup } from "./cleanup.js";
 import { loadConfig } from "./config.js";
 import { octokitClient } from "./github.js";
+import { janitorHandler } from "./janitor.js";
 import {
   dockerRunner,
   ensureReviewerImage,
@@ -20,17 +21,22 @@ const deps = {
   gh: octokitClient(config),
   runner: dockerRunner(config.reviewer),
   git: config.git,
+  maxStorageBytes: config.maxStorageBytes,
+  repoIdleDays: config.repoIdleDays,
 };
 
 // Global limit of simultaneous reviewers (ARCHITECTURE.md §8); extra jobs wait in the queue.
 await run({
   connectionString: config.databaseUrl,
   concurrency: config.concurrency,
+  // Daily at 04:00 UTC; POST /admin/gc queues it on demand.
+  crontab: `0 4 * * * ${TASKS.janitor}`,
   taskList: {
     [TASKS.review]: (payload, helpers) =>
       handleReview(deps, payload as ReviewJob, helpers),
     [TASKS.cleanup]: (payload, helpers) =>
       handleCleanup(deps, payload as CleanupJob, helpers),
+    [TASKS.janitor]: (_payload, helpers) => janitorHandler(deps, helpers),
   },
 });
 console.log("worker started");

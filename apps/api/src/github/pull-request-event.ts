@@ -10,7 +10,7 @@ const IMMEDIATE_SECONDS = 0;
 const PUSH_DEBOUNCE_SECONDS = 120;
 
 /** owner/repo end up in filesystem paths and job keys. */
-const SAFE_NAME = /^[A-Za-z0-9_.-]+$/;
+export const SAFE_NAME = /^[A-Za-z0-9_.-]+$/;
 /** SHA-1 (40 hex) or SHA-256 (64 hex) object id. */
 const GIT_SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 

@@ -3,7 +3,13 @@ import { runMigrations } from "graphile-worker";
 import pg from "pg";
 import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
-import { enqueueCleanup } from "./queue/enqueue-cleanup.js";
+import { adminStatus, pullRequestState } from "./db/admin-queries.js";
+import {
+  enqueueCleanup,
+  enqueueJanitor,
+  enqueueRepoCleanup,
+} from "./queue/enqueue-cleanup.js";
+import { enqueueRereview } from "./queue/enqueue-rereview.js";
 import { enqueueReview } from "./queue/enqueue-review.js";
 
 const config = loadConfig(process.env);
@@ -17,6 +23,12 @@ const app = createApp({
   webhookSecret: config.webhookSecret,
   enqueueReview: (job, delaySeconds) => enqueueReview(pool, job, delaySeconds),
   enqueueCleanup: (job) => enqueueCleanup(pool, job),
+  adminToken: config.adminToken,
+  status: () => adminStatus(pool),
+  pullRequest: (pr) => pullRequestState(pool, pr),
+  rereview: (pr) => enqueueRereview(pool, pr),
+  enqueueRepoCleanup: (job) => enqueueRepoCleanup(pool, job),
+  enqueueJanitor: () => enqueueJanitor(pool),
 });
 
 serve({ fetch: app.fetch, port: config.port }, ({ port }) =>

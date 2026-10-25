@@ -24,12 +24,18 @@ CREATE TABLE reviews (
   id               bigserial PRIMARY KEY,
   pull_request_id  bigint NOT NULL REFERENCES pull_requests ON DELETE CASCADE,
   sha              text NOT NULL,
+  -- State machine in packages/contracts/src/review-status.ts
+  status           text NOT NULL DEFAULT 'running'
+                   CHECK (status IN ('running', 'published', 'stale', 'failed', 'cancelled')),
+  error            text,   -- why it failed
+  job_id           bigint, -- Graphile job that claimed it; only that job's retries reclaim it
   started_at       timestamptz NOT NULL DEFAULT now(),
   finished_at      timestamptz,
-  result           text,
-  github_review_id bigint,
-  UNIQUE (pull_request_id, sha) -- each (PR, SHA) is reviewed once
+  github_review_id bigint
 );
+
+-- Each (PR, SHA) is reviewed once; a re-review cancels the old row, which stays as history.
+CREATE UNIQUE INDEX reviews_one_per_sha ON reviews (pull_request_id, sha) WHERE status <> 'cancelled';
 
 CREATE TABLE findings (
   id         bigserial PRIMARY KEY,

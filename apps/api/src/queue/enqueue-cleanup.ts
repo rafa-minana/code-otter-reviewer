@@ -30,3 +30,34 @@ export async function enqueueCleanup(
     ]);
   });
 }
+
+const REPO_PULL_NUMBERS_SQL = `
+  SELECT pr.number FROM pull_requests pr JOIN repos r ON r.id = pr.repo_id
+  WHERE r.owner = $1 AND r.name = $2`;
+
+/** Whole repo, mirror and rows included: its pending reviews go first, in the same transaction. */
+export async function enqueueRepoCleanup(
+  pool: Pool,
+  job: Omit<CleanupJob, "number">,
+): Promise<void> {
+  await withTransaction(pool, async (tx) => {
+    const { rows } = await tx.query<{ number: number }>(REPO_PULL_NUMBERS_SQL, [
+      job.owner,
+      job.repo,
+    ]);
+    for (const { number } of rows)
+      await tx.query(REMOVE_PENDING_REVIEW_SQL, [
+        reviewJobKey({ ...job, number }),
+      ]);
+    await tx.query(ADD_CLEANUP_JOB_SQL, [
+      TASKS.cleanup,
+      JSON.stringify(job),
+      `cleanup:${job.owner}/${job.repo}`,
+    ]);
+  });
+}
+
+/** Runs the janitor now; the key folds repeated calls into one pending run. */
+export async function enqueueJanitor(pool: Pool): Promise<void> {
+  await pool.query(ADD_CLEANUP_JOB_SQL, [TASKS.janitor, "{}", TASKS.janitor]);
+}
