@@ -117,6 +117,17 @@ El token de instalación de la GitHub App (caduca a la hora) se pide en cada rev
 **Entrada y salida por stdin/stdout** (en vez de ficheros en `/in` y `/out`: sin directorios compartidos, sin problemas de permisos y sin nada en disco): el worker escribe un `ReviewerRequest {input, finalAttempt}` en el stdin y lee un `ReviewerOutput` del stdout. Los logs del revisor van a stderr. **El worker valida esa salida con zod** (`parseReviewerOutput` en `worker/core.ts`: tipos, líneas positivas, tamaños máximos, como mucho 50 hallazgos) antes de que llegue a GitHub o a la BD, porque el contenedor ha estado en contacto con código no fiable.
 
 **Salida:** `ReviewerOutput` con el resumen, el riesgo y los hallazgos `{path, startLine?, line, side, severity, body, suggestion?, confidence?}`. `startLine`–`line` es el rango de líneas del hallazgo, como en el `/review` de PR-Agent; sin `startLine` es una sola línea.
+**Si falla, el código de salida dice qué hacer** (`REVIEWER_EXIT` en `@otter/contracts`). Lo decide el revisor (`reviewer/errors.ts`) a partir del `APICallError` del AI SDK, que ya sabe si un error es reintentable:
+
+| Salida | Cuándo | El worker… |
+|---|---|---|
+| `2` permanente | 4xx no reintentable: clave o modelo mal, prompt demasiado largo, presupuesto por revisión del gateway | marca la revisión `failed` con el error, sin reintentos |
+| `3` saturado | 502, 503 o 529 tras los reintentos del SDK | la **aplaza 5 min** (`deferrals` + 1), hasta 6 veces (30 min); después, `failed` |
+| `4` cupo agotado | el gateway marca su 403 con `x-otter-quota` (cupo del proveedor o su propio tope diario), con `retry-after` si sabe cuándo se reinicia. El revisor lo escribe en stdout (`ReviewerFailure`) | la **aplaza hasta el reinicio** + 1 min (acotado entre 1 min y 24 h, porque viene de un contenedor no fiable), o **5 h** si no se sabe (p. ej. sin saldo), hasta 4 veces (`quotaWaits`); después, `failed` |
+
+**Al aplazar,** el worker encola el mismo job más tarde y le pasa la fila, que sigue `running`. Si mientras tanto llega un push, gana el push y la fila vieja queda `stale`. Las revisiones que esperan el mismo momento (un reinicio de cupo) despiertan en el mismo minuto y salen por orden de llegada (`queuedAt`), de `WORKER_CONCURRENCY` en `WORKER_CONCURRENCY`: Graphile ordena solo por `run_at`, así que cada una se adelanta 1 µs por segundo que lleva en cola.
+| `1` transitorio | lo demás: 429 por minuto, 500, red, salida inválida del LLM | lanza el error y Graphile reintenta (3 intentos) |
+
 
 **Pipeline interno:**
 1. Compactar el diff dentro del presupuesto de tokens (ver "Compactación del diff").
@@ -272,6 +283,13 @@ Proxy propio (Hono, sin LiteLLM): la única salida de los revisores y el único 
 | Como mucho 4 peticiones a la vez por intento | 429 + `retry-after: 1` | sí |
 | Presupuesto del intento y tope diario | 403 | no, a propósito |
 
+| Respuesta del proveedor: cupo agotado | 403 `provider quota exhausted: <mensaje del proveedor>` | no, a propósito |
+
+**Cupo agotado** (`quotaExhausted` en `providers.ts`): casi siempre llega como un 429, que el SDK y Graphile reintentarían en vano. El gateway lo reconoce por proveedor y lo convierte en un 403 marcado con `x-otter-quota`, con `retry-after` cuando sabe el reinicio (`quotaResetSeconds`: el `retry-after` del proveedor o el `X-RateLimit-Reset` de OpenRouter; para su tope diario, las 00:00 UTC):
+- **openai / openai-compatible:** 402 (sin saldo, OpenRouter), `insufficient_quota` (OpenAI) o 429 con `per-day` en el mensaje (`free-models-per-day` de OpenRouter; su `per-min` sigue siendo reintentable);
+- **anthropic:** 402 `billing_error`, o 400 con `credit balance` o `usage limits` (límite de gasto mensual);
+- **gemini:** 429 con `PerDay` en los detalles de la cuota;
+- **todos:** un 429 que pide esperar más de 15 minutos (lo que vive el contenedor), como el límite diario de tokens de Anthropic.
 - **El tope de peticiones a la vez cierra un hueco:** sin él, un revisor comprometido lanzaría todas sus peticiones en paralelo antes de que se contara ningún token.
 - **Reenvío:**
   - la URL es una constante (`upstream + ruta permitida`), así que no hay SSRF;
@@ -321,6 +339,7 @@ published | stale | failed ──► cancelled   (solo el admin, al forzar la re
 - **Solo el mismo job reclama una fila `running`:** son sus reintentos tras un fallo o un crash. Otro job con el mismo SHA se salta, así que con `WORKER_CONCURRENCY > 1` no hay revisiones dobles.
 - **"En curso"** (`activeReviewSql`) significa `running` y que su job todavía pueda ejecutarla. Una fila `running` sin job (por ejemplo, el PR se cerró entre reintentos) es huérfana: no bloquea al barrendero, y la re-revisión la marca `failed` antes de cancelarla.
 - **Disco lleno:** si `/var/otter` llega a `MAX_SPACE_REPO_STORAGE_GB` (10 por defecto, medido con `du` antes del checkout) o git falla con ENOSPC, la revisión pasa a `failed` con el error y no se reintenta.
+- **Errores del LLM:** según el código de salida del revisor (§5), la revisión falla al momento (errores permanentes), se aplaza (5 min si el proveedor está saturado; hasta el reinicio, o 5 h, si se acabó el cupo) o la reintenta Graphile (transitorios).
 
 ## 8. Limpieza
 

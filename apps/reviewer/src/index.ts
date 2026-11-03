@@ -3,6 +3,7 @@
 import { text } from "node:stream/consumers";
 import type { ReviewerRequest } from "@otter/contracts";
 import { review } from "./agent.js";
+import { classify } from "./errors.js";
 import { createLlm } from "./llm.js";
 
 /** Where the worker mounts the PR's checkout, read-only. */
@@ -21,5 +22,7 @@ try {
   process.stdout.write(JSON.stringify(output));
 } catch (err) {
   console.error(err instanceof Error ? err.message : err);
-  process.exitCode = 1;
+  const { exitCode, failure } = classify(err);
+  if (failure) process.stdout.write(JSON.stringify(failure)); // only on failure, so stdout never mixes it with an output
+  process.exitCode = exitCode;
 }

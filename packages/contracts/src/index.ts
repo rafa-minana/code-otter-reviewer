@@ -19,6 +19,9 @@ export interface ReviewJob {
   repo: string;
   number: number;
   sha: string;
+  deferrals?: number; // times the worker postponed it because the LLM provider was overloaded
+  quotaWaits?: number; // times it waited for the LLM quota to reset
+  queuedAt?: string; // when it was first queued, set on its first postponement: postponed reviews run in this order
 }
 
 /** Without `number` it cleans the whole repo, mirror included. */
@@ -54,6 +57,22 @@ export interface ReviewerOutput {
   filtered: string[]; // paths skipped by .otter.yaml or default filters
   deleted: string[]; // files deleted entirely
 }
+
+/** Exit codes of the reviewer container: how the worker treats a failed review. */
+export const REVIEWER_EXIT = {
+  transient: 1, // Graphile retries the job
+  permanent: 2, // retrying can't fix it (bad config, quota exhausted, request too big): fail now
+  overloaded: 3, // the provider is saturated: the worker postpones the job
+  quota: 4, // the LLM quota ran out: the worker postpones the job until it resets
+} as const;
+
+/** What the reviewer writes on stdout when it exits with REVIEWER_EXIT.quota. */
+export interface ReviewerFailure {
+  retryAfterSeconds?: number; // until the quota resets, when the gateway knows it
+}
+
+/** Set by the gateway on a refusal for an exhausted quota (its daily cap or the provider's); `retry-after` may come with it. */
+export const QUOTA_EXHAUSTED_HEADER = "x-otter-quota";
 
 /** Graphile Worker task names: the api enqueues them, the worker registers them. */
 export const TASKS = {

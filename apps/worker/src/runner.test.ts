@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { verifyReviewToken } from "@otter/gateway/token.js";
-import { dockerRunArgs, REVIEWER_LLM_ENV, reviewerEnv } from "./runner.js";
+import { REVIEWER_EXIT } from "@otter/contracts";
+import { dockerRunArgs, REVIEWER_LLM_ENV, reviewerEnv, reviewerError } from "./runner.js";
 
 const SECRET = "s".repeat(32);
 const cfg = {
@@ -47,4 +48,20 @@ test("the container talks to the gateway with this review's token, never the rea
   assert.ok(!Object.values(env).includes("sk-real"));
   assert.equal(env.LLM_MODEL, "m", "the rest of the LLM settings still pass");
   assert.equal(env.PATH, "/bin", "the docker CLI keeps its own environment");
+});
+
+test("a failed container keeps its exit code, so the worker knows whether to retry", () => {
+  const permanent = reviewerError({ code: REVIEWER_EXIT.permanent, stderr: "otter gateway: provider quota exhausted: free-models-per-day\n", message: "Command failed" });
+  assert.equal(permanent.exitCode, REVIEWER_EXIT.permanent);
+  assert.match(permanent.message, /^reviewer container failed \(exit 2\): otter gateway: provider quota exhausted/);
+  const timedOut = reviewerError({ code: null, signal: "SIGTERM", message: "Command failed: docker run" });
+  assert.equal(timedOut.exitCode, undefined, "a timeout is not a verdict: Graphile retries it");
+});
+
+test("a quota failure carries when it resets; anything unreadable on stdout is ignored", () => {
+  const quota = reviewerError({ code: REVIEWER_EXIT.quota, stdout: '{"retryAfterSeconds":3600}', stderr: "quota", message: "x" });
+  assert.equal(quota.exitCode, REVIEWER_EXIT.quota);
+  assert.equal(quota.retryAfterSeconds, 3600);
+  for (const stdout of ["", "{}", "not json", '{"retryAfterSeconds":-5}', '{"retryAfterSeconds":"1"}'])
+    assert.equal(reviewerError({ code: REVIEWER_EXIT.quota, stdout, message: "x" }).retryAfterSeconds, undefined, stdout);
 });

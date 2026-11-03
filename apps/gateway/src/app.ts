@@ -1,6 +1,7 @@
 import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
+import { QUOTA_EXHAUSTED_HEADER } from "@otter/contracts";
 import type { Budget } from "./budget.js";
 import type { GatewayConfig } from "./config.js";
 import {
@@ -11,7 +12,12 @@ import {
   MAX_RESPONSE_BYTES,
   UPSTREAM_TIMEOUT_MS,
 } from "./constants.js";
-import { PROVIDERS } from "./providers.js";
+import {
+  PROVIDERS,
+  providerMessage,
+  quotaExhausted,
+  quotaResetSeconds,
+} from "./providers.js";
 import { verifyReviewToken, type ReviewGrant } from "./token.js";
 
 export interface GatewayDeps {
@@ -22,6 +28,12 @@ export interface GatewayDeps {
   /** One JSON line per request: ids, statuses, timings and token counts; never bodies, headers or keys. */
   log?: (entry: Record<string, unknown>) => void;
 }
+
+/** Marks a refusal as an exhausted quota for the reviewer (REVIEWER_EXIT.quota), with when it resets if known. */
+const quotaHeaders = (resetSeconds: number | undefined) => ({
+  [QUOTA_EXHAUSTED_HEADER]: "exhausted",
+  ...(resetSeconds !== undefined && { "retry-after": String(resetSeconds) }),
+});
 
 /** Thrown inside a request to answer with our own error, in the provider's shape. */
 class Refusal {
@@ -115,7 +127,15 @@ export function createGateway(deps: GatewayDeps): Hono {
         `the provider's response exceeded ${MAX_RESPONSE_BYTES} bytes`,
       );
 
-    const tokens = upstream.ok ? provider.tokensUsed(parseObject(payload)) : 0;
+    const json = parseObject(payload);
+    // A quota usually arrives as a retryable 429: our 403 tells the reviewer not to retry it (REVIEWER_EXIT.permanent).
+    if (!upstream.ok && quotaExhausted(provider, upstream.status, json, upstream.headers))
+      throw new Refusal(
+        HTTP_STATUS.forbidden,
+        `provider quota exhausted: ${providerMessage(json)}`,
+        quotaHeaders(quotaResetSeconds(json, upstream.headers, now())),
+      );
+    const tokens = upstream.ok ? provider.tokensUsed(json) : 0;
     const out = new Headers();
     for (const name of FORWARDED_RESPONSE_HEADERS) {
       const value = upstream.headers.get(name);
@@ -168,7 +188,9 @@ export function createGateway(deps: GatewayDeps): Hono {
               denial.message,
               denial.status === HTTP_STATUS.tooManyRequests
                 ? { "retry-after": "1" }
-                : {},
+                : denial.quotaResetSeconds !== undefined
+                  ? quotaHeaders(denial.quotaResetSeconds)
+                  : {},
             );
           let result: Awaited<ReturnType<typeof forward>> | undefined;
           try {

@@ -1,5 +1,6 @@
 // Everything the gateway knows about each LLM vendor, mirroring how the AI SDK calls it (apps/reviewer/src/llm.ts).
 import type { LlmProviderName } from "@otter/contracts";
+import { QUOTA_RETRY_AFTER_SECONDS } from "./constants.js";
 
 export interface Provider {
   /** Whether LLM_BASE_URL may (optional), must (required) or must not (forbidden) be set. */
@@ -17,6 +18,8 @@ export interface Provider {
   tokensUsed(body: unknown): number;
   /** An error in the provider's own shape, so the AI SDK surfaces our message as-is. */
   errorBody(status: number, message: string): unknown;
+  /** The error means no credit or quota is left (daily, monthly, balance): retrying can't fix it. */
+  quotaExhausted(status: number, body: unknown): boolean;
 }
 
 const count = (v: unknown) =>
@@ -25,6 +28,8 @@ const field = (o: unknown, key: string): unknown =>
   typeof o === "object" && o !== null
     ? (o as Record<string, unknown>)[key]
     : undefined;
+const errorField = (body: unknown, key: string) =>
+  field(field(body, "error"), key);
 const bearer = (headers: Headers) =>
   /^Bearer (.+)$/.exec(headers.get("authorization") ?? "")?.[1];
 
@@ -66,6 +71,14 @@ const OPENAI: Provider = {
   errorBody: (status, message) => ({
     error: { message, type: "otter_gateway", code: String(status) },
   }),
+  // 402: no credit left (OpenRouter). insufficient_quota: OpenAI's billing quota.
+  // "per-day": OpenRouter's free-models-per-day (its free-models-per-min stays retryable).
+  quotaExhausted: (status, body) =>
+    status === 402 ||
+    (status === 429 &&
+      (errorField(body, "code") === "insufficient_quota" ||
+        errorField(body, "type") === "insufficient_quota" ||
+        /per-day/i.test(String(errorField(body, "message") ?? "")))),
 };
 
 export const PROVIDERS: Record<LlmProviderName, Provider> = {
@@ -91,6 +104,11 @@ export const PROVIDERS: Record<LlmProviderName, Provider> = {
       type: "error",
       error: { type: ANTHROPIC_ERROR_TYPES[status] ?? "api_error", message },
     }),
+    // 402 billing_error: no credit. 400: credit balance too low, or the monthly spend limit reached.
+    quotaExhausted: (status, body) =>
+      status === 402 ||
+      (status === 400 &&
+        /credit balance|usage limits/i.test(String(errorField(body, "message") ?? ""))),
   },
   openai: OPENAI,
   // Same protocol, someone else's server: OpenRouter, Groq, Together, DeepSeek, Ollama, LM Studio…
@@ -113,8 +131,55 @@ export const PROVIDERS: Record<LlmProviderName, Provider> = {
         status: GOOGLE_ERROR_STATUSES[status] ?? "INTERNAL",
       },
     }),
+    // A daily quota names itself in the QuotaFailure details, e.g. GenerateRequestsPerDayPerProjectPerModel.
+    quotaExhausted: (status, body) =>
+      status === 429 && /PerDay/.test(JSON.stringify(errorField(body, "details") ?? "")),
   },
 };
+
+/** The provider's own rule, or any 429 asking to wait longer than a review lives (e.g. Anthropic's tokens per day). */
+export function quotaExhausted(
+  provider: Provider,
+  status: number,
+  body: unknown,
+  headers: Headers,
+): boolean {
+  return (
+    provider.quotaExhausted(status, body) ||
+    (status === 429 && retryAfterSeconds(headers) > QUOTA_RETRY_AFTER_SECONDS)
+  );
+}
+
+/**
+ * Seconds until an exhausted quota resets, when the provider says: its `retry-after`, or OpenRouter's
+ * `X-RateLimit-Reset` (epoch ms) in the error's metadata. Undefined when unknown.
+ */
+export function quotaResetSeconds(
+  body: unknown,
+  headers: Headers,
+  now = Date.now(),
+): number | undefined {
+  const retryAfter = retryAfterSeconds(headers, now);
+  if (retryAfter > 0) return Math.ceil(retryAfter);
+  const reset = Number(
+    field(field(errorField(body, "metadata"), "headers"), "X-RateLimit-Reset"),
+  );
+  return reset > now ? Math.ceil((reset - now) / 1000) : undefined;
+}
+
+/** `retry-after` in seconds or as an HTTP date; 0 when absent or unreadable. */
+function retryAfterSeconds(headers: Headers, now = Date.now()): number {
+  const value = headers.get("retry-after");
+  if (!value) return 0;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) return seconds;
+  const at = Date.parse(value);
+  return Number.isNaN(at) ? 0 : (at - now) / 1000;
+}
+
+/** The provider's own error message, kept when the gateway turns its error into ours. */
+export const providerMessage = (body: unknown): string =>
+  String(errorField(body, "message") ?? "no message");
 
 /**
  * Where the gateway sends requests: LLM_BASE_URL or the vendor's own API, as the provider's rule allows.

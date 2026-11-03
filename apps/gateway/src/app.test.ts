@@ -153,6 +153,25 @@ test("provider errors pass through; unreachable is 502 and too slow is 504, and 
   for (let i = 0; i < MAX_INFLIGHT_PER_REVIEW; i++) assert.equal((await post(down.app)).status, 502, "never stuck at 429");
 });
 
+test("an exhausted provider quota becomes a non-retryable 403 that keeps the provider's message", async () => {
+  const quota = setup({
+    reply: () => Response.json({ error: { message: "Rate limit exceeded: free-models-per-day", code: 429 } }, { status: 429 }),
+  });
+  const res = await post(quota.app);
+  assert.equal(res.status, 403);
+  assert.equal(await errorMessage(res), "otter gateway: provider quota exhausted: Rate limit exceeded: free-models-per-day");
+  assert.match(quota.logs[0], /"status":403.*"refused":"provider quota exhausted/);
+  assert.equal(res.headers.get("x-otter-quota"), "exhausted", "the reviewer tells it apart from other 403s");
+  assert.equal(res.headers.get("retry-after"), null, "no reset given: none invented");
+
+  const reset = NOW + 3_600_000;
+  const withReset = setup({
+    reply: () => Response.json({ error: { message: "free-models-per-day", metadata: { headers: { "X-RateLimit-Reset": String(reset) } } } }, { status: 429 }),
+  });
+  assert.equal((await post(withReset.app)).headers.get("retry-after"), "3600");
+  for (let i = 0; i < MAX_INFLIGHT_PER_REVIEW; i++) assert.equal((await post(quota.app)).status, 403, "the slot is freed");
+});
+
 test("logs one line per request with ids and counts, never the token, the key or the body", async () => {
   const { app, logs } = setup();
   await post(app);

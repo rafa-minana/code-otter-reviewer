@@ -10,6 +10,8 @@ export const UPSTREAM_TIMEOUT_MS = 5 * 60_000;
 
 /** The reviewer container lives 15 min at most; the margin covers clock skew and the last response. */
 export const REVIEW_TOKEN_TTL_MS = 20 * 60_000;
+/** A 429 asking to wait longer than a reviewer container lives (15 min) is a quota, not a blip. */
+export const QUOTA_RETRY_AFTER_SECONDS = 15 * 60;
 export const GATEWAY_SECRET_MIN_LENGTH = 32;
 
 /** Worst real case: 3 chunks × (11 review + 11 verify steps) = 66 calls, plus the SDK's retries. */

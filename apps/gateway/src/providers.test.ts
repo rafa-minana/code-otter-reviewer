@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { PROVIDERS, upstreamBase } from "./providers.js";
+import { PROVIDERS, quotaExhausted, quotaResetSeconds, upstreamBase } from "./providers.js";
 
 const { anthropic, openai, gemini } = PROVIDERS;
 
@@ -57,4 +57,38 @@ test("errors take each provider's shape, so the AI SDK shows our message", () =>
   assert.deepEqual(anthropic.errorBody(403, "m"), { type: "error", error: { type: "permission_error", message: "m" } });
   assert.deepEqual(openai.errorBody(403, "m"), { error: { message: "m", type: "otter_gateway", code: "403" } });
   assert.deepEqual(gemini.errorBody(403, "m"), { error: { code: 403, message: "m", status: "PERMISSION_DENIED" } });
+});
+
+test("a quota or credit that ran out is told apart from a rate limit that passes", () => {
+  const exhausted = (p: (typeof PROVIDERS)[keyof typeof PROVIDERS], status: number, body: unknown, headers: Record<string, string> = {}) =>
+    quotaExhausted(p, status, body, new Headers(headers));
+  const openrouter = PROVIDERS["openai-compatible"];
+  const message = (m: string) => ({ error: { message: m } });
+
+  assert.ok(exhausted(openrouter, 429, message("Rate limit exceeded: free-models-per-day. Add 10 credits to unlock 1000 free model requests per day")));
+  assert.ok(exhausted(openrouter, 402, message("Insufficient credits")));
+  assert.ok(exhausted(openai, 429, { error: { message: "You exceeded your current quota", type: "insufficient_quota", code: "insufficient_quota" } }));
+  assert.ok(exhausted(anthropic, 402, { type: "error", error: { type: "billing_error", message: "billing" } }));
+  assert.ok(exhausted(anthropic, 400, message("Your credit balance is too low to access the Anthropic API.")));
+  assert.ok(exhausted(anthropic, 400, message("You have reached your specified API usage limits.")));
+  assert.ok(exhausted(anthropic, 429, message("tokens per day"), { "retry-after": "3600" }));
+  assert.ok(exhausted(gemini, 429, { error: { code: 429, details: [{ violations: [{ quotaId: "GenerateRequestsPerDayPerProjectPerModel-FreeTier" }] }] } }));
+
+  assert.ok(!exhausted(openrouter, 429, message("Rate limit exceeded: free-models-per-min")));
+  assert.ok(!exhausted(openai, 429, message("Rate limit reached"), { "retry-after": "7" }));
+  assert.ok(!exhausted(anthropic, 400, message("prompt is too long")));
+  assert.ok(!exhausted(gemini, 429, { error: { details: [{ violations: [{ quotaId: "GenerateRequestsPerMinutePerProjectPerModel" }] }] } }));
+  for (const p of [anthropic, openai, gemini]) {
+    assert.ok(!exhausted(p, 500, message("per-day")), "only quota statuses");
+    for (const odd of [null, "x", {}]) assert.ok(!exhausted(p, 429, odd));
+  }
+});
+
+test("a quota's reset comes from retry-after, or OpenRouter's X-RateLimit-Reset; else it's unknown", () => {
+  const now = 1_700_000_000_000;
+  assert.equal(quotaResetSeconds({}, new Headers({ "retry-after": "3600" }), now), 3600);
+  const openrouter = { error: { message: "free-models-per-day", metadata: { headers: { "X-RateLimit-Reset": String(now + 7_200_000) } } } };
+  assert.equal(quotaResetSeconds(openrouter, new Headers(), now), 7200);
+  assert.equal(quotaResetSeconds({ error: { metadata: { headers: { "X-RateLimit-Reset": String(now - 1) } } } }, new Headers(), now), undefined, "already past");
+  assert.equal(quotaResetSeconds({ error: { message: "insufficient_quota" } }, new Headers(), now), undefined);
 });

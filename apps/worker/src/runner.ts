@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mintReviewToken } from "@otter/gateway/token.js";
+import type { ReviewerFailure } from "@otter/contracts";
 import type { ReviewerConfig } from "./config.js";
 import type { ContainerRunner } from "./ports.js";
 
@@ -94,18 +95,52 @@ export function dockerRunner(cfg: ReviewerConfig): ContainerRunner {
         return JSON.parse(stdout);
       } catch (err) {
         await removeContainer(name); // on timeout the CLI dies but the container may live on
-        const { code, stderr, message } = err as {
-          code?: unknown;
-          stderr?: string;
-          message: string;
-        };
-        const detail = (stderr || message).trim().slice(-STDERR_TAIL_CHARS);
-        throw new Error(
-          `reviewer container failed (exit ${code ?? "?"}): ${detail}`,
-        );
+        throw reviewerError(err);
       }
     },
   };
+}
+
+/**
+ * A failed review container; `exitCode` (REVIEWER_EXIT) says whether retrying can help, and
+ * `retryAfterSeconds` when an exhausted quota resets, if the reviewer knew. Both come from an untrusted
+ * container: the worker bounds the wait.
+ */
+export class ReviewerError extends Error {
+  constructor(
+    message: string,
+    readonly exitCode: number | undefined,
+    readonly retryAfterSeconds?: number,
+  ) {
+    super(message);
+  }
+}
+
+/** From execFile's error: the container's exit code (`docker run` passes it through), its stderr tail and its ReviewerFailure. */
+export function reviewerError(err: unknown): ReviewerError {
+  const { code, stdout, stderr, message } = err as {
+    code?: unknown;
+    stdout?: string;
+    stderr?: string;
+    message: string;
+  };
+  const detail = (stderr || message).trim().slice(-STDERR_TAIL_CHARS);
+  return new ReviewerError(
+    `reviewer container failed (exit ${code ?? "?"}): ${detail}`,
+    typeof code === "number" ? code : undefined, // a timeout or a full buffer has no exit code
+    retryAfterOf(stdout),
+  );
+}
+
+function retryAfterOf(stdout: string | undefined): number | undefined {
+  try {
+    const { retryAfterSeconds } = JSON.parse(stdout ?? "") as ReviewerFailure;
+    return typeof retryAfterSeconds === "number" && retryAfterSeconds > 0
+      ? retryAfterSeconds
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Fails at startup, with the fix, when the reviewer image hasn't been built. */

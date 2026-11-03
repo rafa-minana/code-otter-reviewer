@@ -11,6 +11,8 @@ export interface BudgetLimits {
 export interface Denial {
   status: typeof HTTP_STATUS.forbidden | typeof HTTP_STATUS.tooManyRequests;
   message: string;
+  /** Set when the denial is a quota that resets: seconds until it does. */
+  quotaResetSeconds?: number;
 }
 
 interface Attempt {
@@ -21,8 +23,10 @@ interface Attempt {
 }
 
 /** One limit: when it's broken, the request is refused with `status` and `message`. */
-interface Rule extends Denial {
+interface Rule extends Omit<Denial, "quotaResetSeconds"> {
   isBroken: (attempt: Attempt, dailyTokens: number) => boolean;
+  /** A quota that resets: when, from `now`. */
+  resetsIn?: (now: number) => number;
 }
 
 /** What `admit` checks, in order; the first broken rule is the answer. */
@@ -31,6 +35,7 @@ const rulesFor = (limits: BudgetLimits): Rule[] => [
     isBroken: (_, dailyTokens) => limits.dailyMaxTokens !== undefined && dailyTokens >= limits.dailyMaxTokens,
     status: HTTP_STATUS.forbidden,
     message: `daily token limit reached (${limits.dailyMaxTokens}); it resets at 00:00 UTC`,
+    resetsIn: secondsToUtcMidnight,
   },
   {
     isBroken: (a) => a.requests >= limits.reviewMaxRequests,
@@ -51,6 +56,11 @@ const rulesFor = (limits: BudgetLimits): Rule[] => [
 
 const newAttempt = (grant: ReviewGrant): Attempt => ({ requests: 0, tokens: 0, inFlight: 0, expiresAt: grant.expiresAt });
 const utcDay = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+const secondsToUtcMidnight = (ms: number) => {
+  const midnight = new Date(ms);
+  midnight.setUTCHours(24, 0, 0, 0);
+  return Math.ceil((midnight.getTime() - ms) / 1000);
+};
 
 /**
  * Spend per review attempt and per UTC day. Requests are counted when admitted and tokens when settled,
@@ -73,7 +83,12 @@ export function createBudget(limits: BudgetLimits, now: () => number = Date.now)
       rollDay();
       const attempt = attempts.get(grant.budgetKey) ?? newAttempt(grant);
       const broken = rules.find((rule) => rule.isBroken(attempt, dailyTokens));
-      if (broken) return { status: broken.status, message: broken.message };
+      if (broken)
+        return {
+          status: broken.status,
+          message: broken.message,
+          ...(broken.resetsIn && { quotaResetSeconds: broken.resetsIn(now()) }),
+        };
       attempts.set(grant.budgetKey, { ...attempt, requests: attempt.requests + 1, inFlight: attempt.inFlight + 1 });
       return null;
     },

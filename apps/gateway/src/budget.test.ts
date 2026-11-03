@@ -43,7 +43,9 @@ test("the daily cap stops every review and resets at 00:00 UTC", () => {
   const b = createBudget({ reviewMaxRequests: 100, reviewMaxTokens: 1e9, dailyMaxTokens: 500 }, c.now);
   assert.equal(b.admit(grant("1")), null);
   b.settle(grant("1"), 500);
-  assert.match(b.admit(grant("2"))?.message ?? "", /daily token limit reached \(500\)/);
+  const denial = b.admit(grant("2"));
+  assert.match(denial?.message ?? "", /daily token limit reached \(500\)/);
+  assert.equal(denial?.quotaResetSeconds, 60, "a quota that says when it resets: 1 min to midnight");
   c.set(Date.UTC(2026, 0, 2, 0, 1));
   assert.equal(b.admit(grant("2")), null);
 });

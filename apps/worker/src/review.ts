@@ -1,7 +1,15 @@
-import { sourcesOf, type Finding, type ReviewJob } from "@otter/contracts";
+import {
+  REVIEWER_EXIT,
+  reviewJobKey,
+  sourcesOf,
+  TASKS,
+  type Finding,
+  type ReviewJob,
+} from "@otter/contracts";
 import type { JobHelpers } from "graphile-worker";
 import { parse as parseYaml } from "yaml";
 import { findingKey, isStale, parseReviewerOutput } from "./core.js";
+import { inTransaction } from "./db/transaction.js";
 import { prDiff } from "./git/diff.js";
 import { withRepoLock } from "./git/lock.js";
 import { ensureMirror, fetchPr } from "./git/mirror.js";
@@ -10,8 +18,30 @@ import { assertStorage, isDiskFull } from "./git/storage.js";
 import { addWorktree } from "./git/worktree.js";
 import type { ContainerRunner, GitHubClient } from "./ports.js";
 import { publishReview } from "./publish.js";
+import { ReviewerError } from "./runner.js";
 
 const CONFIG_PATH = ".otter.yaml";
+/** How long a review waits, and how many times, before it fails, by why the LLM couldn't take it. */
+const WAITS = {
+  // A saturated provider: retried 5 min later, up to 30 min.
+  overloaded: { counter: "deferrals", max: 6, fallbackSeconds: 5 * 60 },
+  // An exhausted quota: until it resets when known (else 5 h), up to 4 times (~a day).
+  quota: { counter: "quotaWaits", max: 4, fallbackSeconds: 5 * 3600 },
+} as const;
+/** A wait from the (untrusted) reviewer is bounded, and lands just after the reset, not on it. */
+const MIN_WAIT_SECONDS = 60;
+const MAX_WAIT_SECONDS = 24 * 3600;
+const RESET_MARGIN_SECONDS = 60;
+
+/**
+ * A postponed job whose payload a newer push replaced (same job, new SHA) leaves its old SHA's row
+ * running: it is stale now.
+ */
+const SUPERSEDED_REVIEWS_SQL = `
+  UPDATE reviews rv SET status = 'stale', finished_at = now()
+  FROM pull_requests pr JOIN repos r ON r.id = pr.repo_id
+  WHERE rv.pull_request_id = pr.id AND r.owner = $1 AND r.name = $2 AND pr.number = $3
+    AND rv.job_id = $5 AND rv.sha <> $4 AND rv.status = ANY($6::text[])`;
 
 /**
  * Each (PR, SHA) is reviewed once (unique among non-cancelled rows). Only a retry of the job that
@@ -29,6 +59,37 @@ const CLAIM_REVIEW_SQL = `
   RETURNING id`;
 
 /** One statement, so the review result, its findings and the PR's last SHA are saved atomically. */
+/** Taken before deferring: enqueueReview (api) locks the same row, so a push in between is never lost. */
+const LOCK_PULL_REQUEST_SQL = `
+  SELECT pr.id FROM pull_requests pr JOIN repos r ON r.id = pr.repo_id
+  WHERE r.owner = $1 AND r.name = $2 AND pr.number = $3
+  FOR UPDATE OF pr`;
+
+/** A newer push is already queued under the PR's key. */
+const PENDING_REVIEW_SQL = `
+  SELECT 1 FROM graphile_worker.jobs WHERE key = $1 AND locked_at IS NULL`;
+
+/**
+ * The running job holds the key: Graphile clears it from this job and creates a new one.
+ * Graphile runs ready jobs by run_at alone, so reviews waiting for the same moment (a quota reset)
+ * wake on the same whole minute, shifted 1 µs earlier per second they have been queued: first in, first out.
+ */
+const DEFER_JOB_SQL = `
+  WITH wake AS (
+    SELECT date_trunc('minute', now() + make_interval(secs => $3)) + interval '1 minute' AS at
+  )
+  SELECT (graphile_worker.add_job(
+    $1, $2::json,
+    run_at       => at - (at - $6::timestamptz) / 1000000,
+    job_key      => $4,
+    max_attempts => $5
+  )).id
+  FROM wake`;
+
+/** The row stays running and moves to the new job, which claims it when it runs. */
+const HAND_OVER_REVIEW_SQL = `
+  UPDATE reviews SET job_id = $2 WHERE id = $1 AND status = 'running'`;
+
 const FINISH_REVIEW_SQL = `
   WITH done AS (
     UPDATE reviews
@@ -62,18 +123,12 @@ export async function handleReview(
   helpers: JobHelpers,
 ): Promise<void> {
   const { gh, runner } = deps;
-  const reviewId = await helpers.withPgClient(
-    async (pg) =>
-      (
-        await pg.query<{ id: string }>(CLAIM_REVIEW_SQL, [
-          job.owner,
-          job.repo,
-          job.number,
-          job.sha,
-          helpers.job.id,
-        ])
-      ).rows[0]?.id,
-  );
+  const reviewId = await helpers.withPgClient(async (pg) => {
+    const params = [job.owner, job.repo, job.number, job.sha, helpers.job.id];
+    await pg.query(SUPERSEDED_REVIEWS_SQL, [...params, sourcesOf("stale")]);
+    return (await pg.query<{ id: string }>(CLAIM_REVIEW_SQL, params)).rows[0]
+      ?.id;
+  });
   if (!reviewId) {
     helpers.logger.info(
       `skip ${job.owner}/${job.repo}#${job.number}@${job.sha}: already reviewed, running under another job, or PR unknown`,
@@ -145,17 +200,80 @@ export async function handleReview(
     );
   } catch (err) {
     const error = (err as Error).message;
-    if (isDiskFull(err)) {
-      // Retrying can't free space: fail now instead of letting Graphile retry.
+    const target = `${job.owner}/${job.repo}#${job.number}@${job.sha}`;
+    const exitCode = err instanceof ReviewerError ? err.exitCode : undefined;
+    if (isDiskFull(err) || exitCode === REVIEWER_EXIT.permanent) {
+      // Retrying can't fix it (no space, bad config, quota exhausted): fail now instead of letting Graphile retry.
       await finish("failed", null, [], error);
-      helpers.logger.error(
-        `abort ${job.owner}/${job.repo}#${job.number}@${job.sha}: ${error}`,
+      helpers.logger.error(`abort ${target}: ${error}`);
+      return;
+    }
+    const why =
+      exitCode === REVIEWER_EXIT.overloaded
+        ? "overloaded"
+        : exitCode === REVIEWER_EXIT.quota
+          ? "quota"
+          : undefined;
+    if (why) {
+      const wait = WAITS[why];
+      const seconds =
+        why === "quota" && err instanceof ReviewerError && err.retryAfterSeconds
+          ? Math.min(
+              Math.max(err.retryAfterSeconds + RESET_MARGIN_SECONDS, MIN_WAIT_SECONDS),
+              MAX_WAIT_SECONDS,
+            )
+          : wait.fallbackSeconds;
+      const outcome = await defer(helpers, job, reviewId, wait, seconds);
+      if (outcome === "superseded") await finish("stale");
+      if (outcome === "gave_up")
+        await finish(
+          "failed",
+          null,
+          [],
+          `LLM ${why}: gave up after waiting ${wait.max} times: ${error}`,
+        );
+      helpers.logger.warn(
+        `LLM ${why} for ${target}: ${outcome === "deferred" ? `retry in ${Math.round(seconds / 60)} min` : outcome}`,
       );
       return;
     }
     if (finalAttempt) await finish("failed", null, [], error); // Graphile gives up after this attempt: record it
     throw err;
   }
+}
+
+/**
+ * The LLM can't take the review now (saturated, or out of quota): queue the same review `seconds`
+ * later instead of burning Graphile's quick retries. The row stays running and is handed to the new job.
+ */
+async function defer(
+  helpers: JobHelpers,
+  job: ReviewJob,
+  reviewId: string,
+  wait: (typeof WAITS)[keyof typeof WAITS],
+  seconds: number,
+): Promise<"deferred" | "superseded" | "gave_up"> {
+  const waited = job[wait.counter] ?? 0;
+  return helpers.withPgClient((pg) =>
+    inTransaction(pg, async () => {
+      await pg.query(LOCK_PULL_REQUEST_SQL, [job.owner, job.repo, job.number]);
+      const key = reviewJobKey(job);
+      if ((await pg.query(PENDING_REVIEW_SQL, [key])).rowCount)
+        return "superseded";
+      if (waited >= wait.max) return "gave_up";
+      const queuedAt = job.queuedAt ?? new Date(helpers.job.created_at).toISOString();
+      const { rows } = await pg.query<{ id: string }>(DEFER_JOB_SQL, [
+        TASKS.review,
+        JSON.stringify({ ...job, [wait.counter]: waited + 1, queuedAt }),
+        seconds,
+        key,
+        helpers.job.max_attempts,
+        queuedAt,
+      ]);
+      await pg.query(HAND_OVER_REVIEW_SQL, [reviewId, rows[0].id]);
+      return "deferred";
+    }),
+  );
 }
 
 /** Mirror → fetch → worktree → diff, under the repo lock. The LLM runs outside it. */

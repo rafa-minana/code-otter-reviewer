@@ -390,6 +390,9 @@ Coming next: incremental reviews and `@otter` commands (v2). See [ARCHITECTURE.m
 npm install
 npm test          # builds everything (tsc -b) and runs the node:test suites
 ```
+| A review stays in progress for hours, then fails with `LLM quota: gave up` | Your LLM quota or credit ran out (e.g. OpenRouter's free models per day). Each review waits until the quota resets (or 5 h when unknown, e.g. no credit), up to 4 times. Top up or wait, then re-review (`POST …/pulls/:n/review`) |
+| A review fails at once with a 401, 403 or 404 from the provider | Wrong `LLM_API_KEY` or `LLM_MODEL`. Configuration errors aren't retried anymore: fix `.env`, restart and re-review |
+| A review fails with `LLM overloaded: gave up` | The provider stayed saturated (529/503) for 30 minutes: each review is postponed 5 minutes up to 6 times. Re-review later |
 
 | Folder | What's inside |
 |---|---|
