@@ -44,6 +44,7 @@ pull_request.closed / caducidad 5 días / endpoint admin ──► job cleanup �
 | `worker` | Ejecuta los trabajos: git, contenedores revisores, publicación y limpieza | Se puede escalar a N réplicas. Monta `/var/run/docker.sock` y `/var/otter` |
 | `postgres` | Estado del sistema y cola de trabajos (Graphile Worker) | Única pieza con datos persistentes |
 | `gateway` | Proxy del LLM: única salida de los revisores y único servicio con la clave | Red `default` (internet) + `otter-reviewers`, alias `otter-gateway`. Sin `env_file`: solo recibe las variables `LLM_*` y `GATEWAY_*`. Sin puertos publicados, sistema de ficheros de solo lectura |
+| `proxy` | Caddy delante de la api, **solo en servidor** (`docker-compose.server.yml` + `Caddyfile`): HTTPS automático para `OTTER_DOMAIN` y solo deja pasar `POST /webhook` hacia `api:3000` | Publica 80 y 443; con él, el `3000` de la api deja de publicarse (`ports: !override`). Sistema de ficheros de solo lectura; los certificados van en el volumen `caddy_data` |
 | `reviewer` | **Imagen**, no servicio: el worker la lanza en cada revisión | Sin token de GitHub ni clave del LLM. Red `otter-reviewers` (`internal`): sin internet, solo alcanza el gateway |
 
 ## 3. Escucha y cola (Graphile Worker sobre Postgres)
@@ -116,7 +117,6 @@ El token de instalación de la GitHub App (caduca a la hora) se pide en cada rev
 
 **Entrada y salida por stdin/stdout** (en vez de ficheros en `/in` y `/out`: sin directorios compartidos, sin problemas de permisos y sin nada en disco): el worker escribe un `ReviewerRequest {input, finalAttempt}` en el stdin y lee un `ReviewerOutput` del stdout. Los logs del revisor van a stderr. **El worker valida esa salida con zod** (`parseReviewerOutput` en `worker/core.ts`: tipos, líneas positivas, tamaños máximos, como mucho 50 hallazgos) antes de que llegue a GitHub o a la BD, porque el contenedor ha estado en contacto con código no fiable.
 
-**Salida:** `ReviewerOutput` con el resumen, el riesgo y los hallazgos `{path, startLine?, line, side, severity, body, suggestion?, confidence?}`. `startLine`–`line` es el rango de líneas del hallazgo, como en el `/review` de PR-Agent; sin `startLine` es una sola línea.
 **Si falla, el código de salida dice qué hacer** (`REVIEWER_EXIT` en `@otter/contracts`). Lo decide el revisor (`reviewer/errors.ts`) a partir del `APICallError` del AI SDK, que ya sabe si un error es reintentable:
 
 | Salida | Cuándo | El worker… |
@@ -128,6 +128,7 @@ El token de instalación de la GitHub App (caduca a la hora) se pide en cada rev
 **Al aplazar,** el worker encola el mismo job más tarde y le pasa la fila, que sigue `running`. Si mientras tanto llega un push, gana el push y la fila vieja queda `stale`. Las revisiones que esperan el mismo momento (un reinicio de cupo) despiertan en el mismo minuto y salen por orden de llegada (`queuedAt`), de `WORKER_CONCURRENCY` en `WORKER_CONCURRENCY`: Graphile ordena solo por `run_at`, así que cada una se adelanta 1 µs por segundo que lleva en cola.
 | `1` transitorio | lo demás: 429 por minuto, 500, red, salida inválida del LLM | lanza el error y Graphile reintenta (3 intentos) |
 
+**Salida:** `ReviewerOutput` con el resumen, el riesgo y los hallazgos `{path, startLine?, line, side, severity, body, suggestion?, confidence?}`. `startLine`–`line` es el rango de líneas del hallazgo, como en el `/review` de PR-Agent; sin `startLine` es una sola línea.
 
 **Pipeline interno:**
 1. Compactar el diff dentro del presupuesto de tokens (ver "Compactación del diff").
@@ -282,7 +283,6 @@ Proxy propio (Hono, sin LiteLLM): la única salida de los revisores y el único 
 | JSON con el modelo fijado y sin streaming | 400 / 403 | no |
 | Como mucho 4 peticiones a la vez por intento | 429 + `retry-after: 1` | sí |
 | Presupuesto del intento y tope diario | 403 | no, a propósito |
-
 | Respuesta del proveedor: cupo agotado | 403 `provider quota exhausted: <mensaje del proveedor>` | no, a propósito |
 
 **Cupo agotado** (`quotaExhausted` en `providers.ts`): casi siempre llega como un 429, que el SDK y Graphile reintentarían en vano. El gateway lo reconoce por proveedor y lo convierte en un 403 marcado con `x-otter-quota`, con `retry-after` cuando sabe el reinicio (`quotaResetSeconds`: el `retry-after` del proveedor o el `X-RateLimit-Reset` de OpenRouter; para su tope diario, las 00:00 UTC):
@@ -290,6 +290,7 @@ Proxy propio (Hono, sin LiteLLM): la única salida de los revisores y el único 
 - **anthropic:** 402 `billing_error`, o 400 con `credit balance` o `usage limits` (límite de gasto mensual);
 - **gemini:** 429 con `PerDay` en los detalles de la cuota;
 - **todos:** un 429 que pide esperar más de 15 minutos (lo que vive el contenedor), como el límite diario de tokens de Anthropic.
+
 - **El tope de peticiones a la vez cierra un hueco:** sin él, un revisor comprometido lanzaría todas sus peticiones en paralelo antes de que se contara ningún token.
 - **Reenvío:**
   - la URL es una constante (`upstream + ruta permitida`), así que no hay SSRF;
@@ -338,8 +339,8 @@ published | stale | failed ──► cancelled   (solo el admin, al forzar la re
 - **Una sola revisión activa por SHA:** índice único parcial `(pull_request_id, sha) WHERE status <> 'cancelled'`. Las canceladas quedan como historial, con sus hallazgos.
 - **Solo el mismo job reclama una fila `running`:** son sus reintentos tras un fallo o un crash. Otro job con el mismo SHA se salta, así que con `WORKER_CONCURRENCY > 1` no hay revisiones dobles.
 - **"En curso"** (`activeReviewSql`) significa `running` y que su job todavía pueda ejecutarla. Una fila `running` sin job (por ejemplo, el PR se cerró entre reintentos) es huérfana: no bloquea al barrendero, y la re-revisión la marca `failed` antes de cancelarla.
-- **Disco lleno:** si `/var/otter` llega a `MAX_SPACE_REPO_STORAGE_GB` (10 por defecto, medido con `du` antes del checkout) o git falla con ENOSPC, la revisión pasa a `failed` con el error y no se reintenta.
 - **Errores del LLM:** según el código de salida del revisor (§5), la revisión falla al momento (errores permanentes), se aplaza (5 min si el proveedor está saturado; hasta el reinicio, o 5 h, si se acabó el cupo) o la reintenta Graphile (transitorios).
+- **Disco lleno:** si `/var/otter` llega a `MAX_SPACE_REPO_STORAGE_GB` (10 por defecto, medido con `du` antes del checkout) o git falla con ENOSPC, la revisión pasa a `failed` con el error y no se reintenta.
 
 ## 8. Limpieza
 
@@ -363,7 +364,7 @@ Una sola función `cleanupPr()` (y `cleanupRepo()`), usada por el evento de cier
 
 ## 9. Endpoints de administración
 
-Servidos en su propio puerto (`3001`, `ADMIN_PORT`), que el compose publica solo en `127.0.0.1`: el puerto público `3000` solo sirve `/health` y `/webhook`. En un servidor se llega con un túnel SSH. Pendiente: un reverse proxy delante (HTTPS y solo `/webhook` hacia fuera). Protegidos con `Authorization: Bearer $ADMIN_TOKEN` (`hono/bearer-auth`, 32+ caracteres; sin token responden 503). `owner`/`repo` se validan con la misma regla que el webhook, porque acaban en rutas que se borran.
+Servidos en su propio puerto (`3001`, `ADMIN_PORT`), que el compose publica solo en `127.0.0.1`: el puerto público `3000` solo sirve `/health` y `/webhook`. En un servidor se llega con un túnel SSH, y hacia fuera solo sale `POST /webhook`, por el `proxy` (§2). Protegidos con `Authorization: Bearer $ADMIN_TOKEN` (`hono/bearer-auth`, 32+ caracteres; sin token responden 503). `owner`/`repo` se validan con la misma regla que el webhook, porque acaban en rutas que se borran.
 
 ```
 GET    /admin/status                               # colas, revisiones en curso, uso de disco
@@ -381,6 +382,8 @@ Los DELETE y `gc` son idempotentes, pasan por la cola para no competir con una r
 ```
 code-otter/
 ├── docker-compose.yml
+├── docker-compose.server.yml  # solo en servidor: proxy Caddy (HTTPS, solo /webhook)
+├── Caddyfile
 ├── .env.example              # GitHub App, LLM_PROVIDER/MODEL/API_KEY, ADMIN_TOKEN, DATABASE_URL
 ├── Dockerfile                # una sola imagen por app: --build-arg APP=api|worker|reviewer|gateway
 ├── apps/
@@ -449,6 +452,7 @@ Entre procesos, el desacople ya lo dan la cola, los ficheros montados y `@otter/
    - **v1 completo.**
 3. **v2:** revisión incremental completa, endpoints admin, barrendero, comandos `@otter`.
    - ✅ Endpoints admin, barrendero (con `git gc` de los mirrors), estado de la revisión y cuota de disco.
+   - ✅ Reverse proxy (Caddy) en servidor: HTTPS y solo `/webhook` hacia fuera.
 
 ## 13. Pendiente de verificar
 
@@ -459,3 +463,4 @@ Entre procesos, el desacople ya lo dan la cola, los ficheros montados y `@otter/
   - **El proveedor sigue recibiendo el código del PR,** por diseño: el gateway limita a quién se habla, no lo que se envía.
   - **La config del gateway sale del mismo `.env`:** quien pueda editarlo controla la clave y los topes.
 - **El socket de Docker en el worker equivale a ser root en el host** (decisión del plan 3: se deja y se documenta). Quien controla el worker puede crear contenedores que monten el disco del host. Un proxy del socket limita qué llamadas se hacen, pero no evita eso. La mitigación de verdad es un plan propio: Docker rootless, gVisor (`runsc`) o Podman sin root.
+- **Reverse proxy sin rate limiting ni filtro por IP:** Caddy no trae rate limiting sin un plugin, y las IPs de GitHub (`/meta`) cambian. La firma HMAC ya autentica cada webhook y la api rechaza lo demás antes de tocar la BD.

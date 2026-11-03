@@ -1,0 +1,16 @@
+# Reverse proxy in front of the api, server only (docker-compose.server.yml).
+# HTTPS for OTTER_DOMAIN is automatic (Let's Encrypt); plain HTTP redirects to it.
+{$OTTER_DOMAIN} {
+	# Only GitHub's webhook goes out: /health, /admin and anything else stay internal.
+	@webhook {
+		method POST
+		path /webhook
+	}
+	handle @webhook {
+		reverse_proxy api:3000 # streams the body: the api enforces its size limit (MAX_BODY_BYTES)
+	}
+	handle {
+		respond 404
+	}
+	log
+}

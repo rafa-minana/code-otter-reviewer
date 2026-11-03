@@ -311,9 +311,20 @@ Either way, one App happily handles **many repos and organizations**: each insta
 
 ## Running it on a server
 
-Same as locally, with two differences:
-- **No smee.** Point the App's **Webhook URL** at `https://your-domain/webhook`, with a reverse proxy that handles HTTPS (Caddy, nginx, Traefik…) in front of the api's port `3000`.
-- **Only expose port `3000` (`/webhook`).** `/admin` is served on its own port `3001`, published on `127.0.0.1` only: reach it from the server itself or through an SSH tunnel (`ssh -L 3001:localhost:3001 your-server`).
+Same as locally, but without smee and with a [Caddy](https://caddyserver.com) reverse proxy in front of the api (`docker-compose.server.yml`). It gets an HTTPS certificate on its own and lets only `POST /webhook` through; the api's port `3000` is no longer published.
+
+1. Point a domain at the server (an `A`/`AAAA` record) and open ports **80** and **443**: Let's Encrypt checks the domain through them.
+2. In `.env`, set `OTTER_DOMAIN=otter.example.com`.
+3. Start it with both files (needs Docker Compose 2.24 or later):
+   ```bash
+   docker compose -f docker-compose.yml -f docker-compose.server.yml up -d
+   ```
+   Or add `COMPOSE_FILE=docker-compose.yml:docker-compose.server.yml` to `.env` so that plain `docker compose up -d` includes the proxy.
+4. Set the App's **Webhook URL** to `https://otter.example.com/webhook`.
+
+`/admin` is served on its own port `3001`, published on `127.0.0.1` only: reach it from the server itself or through an SSH tunnel (`ssh -L 3001:localhost:3001 your-server`).
+
+To try the proxy on your laptop, use `OTTER_DOMAIN=localhost`: Caddy then signs its own certificate (`curl -k https://localhost/webhook`).
 
 The worker keeps a copy of each repo and a checkout of each open PR in `/var/otter` (on macOS it lives inside Docker's VM: peek with `docker compose exec worker ls /var/otter`). It's capped at `MAX_SPACE_REPO_STORAGE_GB` (10 GB by default): once full, new reviews fail right away with `repo storage full` instead of filling the disk. A PR's checkout is deleted when the PR is closed, and a janitor runs daily at 04:00 UTC: it removes PRs idle for 5 days and repos idle for `KEEP_REPO_IDLE_DAYS` days (30 by default), and compacts the remaining repo copies.
 
@@ -372,11 +383,16 @@ Coming next: incremental reviews and `@otter` commands (v2). See [ARCHITECTURE.m
 | `No endpoints found matching your data policy` (OpenRouter) | In OpenRouter → **Settings** → **Privacy**, allow the providers behind free models |
 | The api or worker can't connect to Postgres | `POSTGRES_PASSWORD` was changed after the database was created, or `DATABASE_URL` was set by hand. See the warning in step 4 |
 | Nothing reaches the api | Is the smee client running, and is the App's **Webhook URL** right? The App's **Advanced** → **Recent Deliveries** page shows every delivery and lets you resend it |
+| `required variable OTTER_DOMAIN is missing a value` | You started `docker-compose.server.yml` without setting `OTTER_DOMAIN` in `.env` |
+| On a server, GitHub can't connect or reports a TLS error | Caddy couldn't get the certificate: the domain must point at the server and ports 80 and 443 must be open. See `docker compose logs proxy` |
 | Webhooks arrive but nothing gets reviewed | Is the App installed on that repo, with the permissions from step 2? A commit that was already reviewed won't be reviewed again |
 | The worker won't start: `reviewer image "code-otter-reviewer" not found` | Build it: `docker compose build reviewer` (needed once, and after every update) |
 | The worker won't start: `reviewer network "…" must exist and be internal` | Start everything with `docker compose up`, which creates the `otter-reviewers` network. If your `.env` still has `REVIEWER_NETWORK=bridge` from an older version, change it to `otter-reviewers` |
 | `GATEWAY_SECRET must be at least 32 characters` | Add it to `.env`: `openssl rand -hex 32` |
 | A review fails with `otter gateway: review budget exhausted` | The review hit its spending cap. Huge PRs may need more: raise `GATEWAY_REVIEW_MAX_REQUESTS` or `GATEWAY_REVIEW_MAX_TOKENS` |
+| A review stays in progress for hours, then fails with `LLM quota: gave up` | Your LLM quota or credit ran out (e.g. OpenRouter's free models per day). Each review waits until the quota resets (or 5 h when unknown, e.g. no credit), up to 4 times. Top up or wait, then re-review (`POST …/pulls/:n/review`) |
+| A review fails at once with a 401, 403 or 404 from the provider | Wrong `LLM_API_KEY` or `LLM_MODEL`. Configuration errors aren't retried anymore: fix `.env`, restart and re-review |
+| A review fails with `LLM overloaded: gave up` | The provider stayed saturated (529/503) for 30 minutes: each review is postponed 5 minutes up to 6 times. Re-review later |
 | Reviews fail with `repo storage full` | `/var/otter` reached `MAX_SPACE_REPO_STORAGE_GB`. Run the janitor (`POST /admin/gc`), remove a repo (`DELETE /admin/repos/:owner/:repo`) or raise the quota, then re-review (`POST …/pulls/:n/review`) |
 | The api won't start: `ADMIN_TOKEN must be at least 32 characters` | Generate one with `openssl rand -hex 32`, or leave it empty to disable `/admin` |
 | Reviews fail with `otter gateway: daily token limit reached` | `GATEWAY_DAILY_MAX_TOKENS` was reached; it resets at 00:00 UTC (or when the gateway restarts) |
@@ -390,9 +406,6 @@ Coming next: incremental reviews and `@otter` commands (v2). See [ARCHITECTURE.m
 npm install
 npm test          # builds everything (tsc -b) and runs the node:test suites
 ```
-| A review stays in progress for hours, then fails with `LLM quota: gave up` | Your LLM quota or credit ran out (e.g. OpenRouter's free models per day). Each review waits until the quota resets (or 5 h when unknown, e.g. no credit), up to 4 times. Top up or wait, then re-review (`POST …/pulls/:n/review`) |
-| A review fails at once with a 401, 403 or 404 from the provider | Wrong `LLM_API_KEY` or `LLM_MODEL`. Configuration errors aren't retried anymore: fix `.env`, restart and re-review |
-| A review fails with `LLM overloaded: gave up` | The provider stayed saturated (529/503) for 30 minutes: each review is postponed 5 minutes up to 6 times. Re-review later |
 
 | Folder | What's inside |
 |---|---|

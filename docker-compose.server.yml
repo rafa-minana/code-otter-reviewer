@@ -1,0 +1,26 @@
+# Server only, on top of docker-compose.yml: Caddy serves /webhook over HTTPS and the api's 3000 is no longer published.
+#   docker compose -f docker-compose.yml -f docker-compose.server.yml up -d
+# or set COMPOSE_FILE=docker-compose.yml:docker-compose.server.yml in .env and run plain `docker compose up -d`.
+services:
+  api:
+    ports: !override ["127.0.0.1:3001:3001"] # 3000 is reached only through the proxy
+
+  proxy:
+    image: caddy:2.11.7-alpine
+    environment:
+      OTTER_DOMAIN: ${OTTER_DOMAIN:?set OTTER_DOMAIN in .env}
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data # certificates: losing them means asking Let's Encrypt again (rate limited)
+      - caddy_config:/config
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    depends_on: [api]
+
+volumes:
+  caddy_data:
+  caddy_config:
