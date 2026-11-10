@@ -1,8 +1,44 @@
-import type { Finding, ReviewerOutput } from "@otter/contracts";
+import { REVIEWER_EXIT, type Finding, type ReviewerOutput } from "@otter/contracts";
 import { parseDiff } from "@otter/reviewer/diff.js";
 import { z } from "zod";
 
 // Pure business rules: no I/O imports allowed here.
+
+/** How long a review waits, and how many times, before it fails, by why the LLM couldn't take it. */
+export const WAITS = {
+  // A saturated provider: retried 5 min later, up to 30 min.
+  overloaded: { counter: "deferrals", max: 6, fallbackSeconds: 5 * 60 },
+  // An exhausted quota: until it resets when known (else 5 h), up to 4 times (~a day).
+  quota: { counter: "quotaWaits", max: 4, fallbackSeconds: 5 * 3600 },
+} as const;
+export type Wait = (typeof WAITS)[keyof typeof WAITS];
+/** A wait from the (untrusted) reviewer is bounded, and lands just after the reset, not on it. */
+const MIN_WAIT_SECONDS = 60;
+const MAX_WAIT_SECONDS = 24 * 3600;
+const RESET_MARGIN_SECONDS = 60;
+
+/** What the worker does with a failed review attempt (ARCHITECTURE.md §5, the reviewer's exit codes). */
+export type NextStep =
+  | { kind: "fail" } // retrying can't fix it: no space, bad key or model, request too big
+  | { kind: "defer"; why: keyof typeof WAITS; wait: Wait; seconds: number } // the LLM can't take it now
+  | { kind: "retry" }; // anything else: Graphile's quick retries
+
+export function nextStep(failure: {
+  diskFull: boolean;
+  exitCode?: number | undefined;
+  retryAfterSeconds?: number | undefined;
+}): NextStep {
+  const { diskFull, exitCode, retryAfterSeconds } = failure;
+  if (diskFull || exitCode === REVIEWER_EXIT.permanent) return { kind: "fail" };
+  const why =
+    exitCode === REVIEWER_EXIT.overloaded ? "overloaded" : exitCode === REVIEWER_EXIT.quota ? "quota" : undefined;
+  if (!why) return { kind: "retry" };
+  const seconds =
+    why === "quota" && retryAfterSeconds
+      ? Math.min(Math.max(retryAfterSeconds + RESET_MARGIN_SECONDS, MIN_WAIT_SECONDS), MAX_WAIT_SECONDS)
+      : WAITS[why].fallbackSeconds;
+  return { kind: "defer", why, wait: WAITS[why], seconds };
+}
 
 const key = (path: string, side: string, line: number) =>
   `${path}:${side}:${line}`;

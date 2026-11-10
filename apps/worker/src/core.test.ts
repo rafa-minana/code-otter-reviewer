@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { diffLines, isStale, parseReviewerOutput, selectPublishable } from "./core.js";
+import { REVIEWER_EXIT } from "@otter/contracts";
+import { diffLines, isStale, nextStep, parseReviewerOutput, selectPublishable } from "./core.js";
 import { DIFF, finding } from "./fixtures.js";
 
 test("diffLines: context and + lines on the new side, across hunks; - lines are not commentable", () => {
@@ -74,4 +75,26 @@ test("parseReviewerOutput rejects anything malformed or oversized from the conta
   ]) {
     assert.throws(() => parseReviewerOutput(bad), /invalid reviewer output/, JSON.stringify(bad)?.slice(0, 80));
   }
+});
+
+test("nextStep: fail, postpone or retry, by the reviewer's exit code; waits for a quota reset are bounded", () => {
+  const step = (failure: Parameters<typeof nextStep>[0]) => {
+    const s = nextStep(failure);
+    return s.kind === "defer" ? `defer ${s.wait.counter} ${s.seconds}` : s.kind;
+  };
+  const cases: [Parameters<typeof nextStep>[0], string][] = [
+    [{ diskFull: true }, "fail"],
+    [{ diskFull: true, exitCode: REVIEWER_EXIT.overloaded }, "fail"], // no space beats a busy provider
+    [{ diskFull: false, exitCode: REVIEWER_EXIT.permanent }, "fail"],
+    [{ diskFull: false, exitCode: REVIEWER_EXIT.overloaded }, "defer deferrals 300"],
+    [{ diskFull: false, exitCode: REVIEWER_EXIT.overloaded, retryAfterSeconds: 7200 }, "defer deferrals 300"],
+    [{ diskFull: false, exitCode: REVIEWER_EXIT.quota, retryAfterSeconds: 7200 }, "defer quotaWaits 7260"],
+    [{ diskFull: false, exitCode: REVIEWER_EXIT.quota }, "defer quotaWaits 18000"],
+    [{ diskFull: false, exitCode: REVIEWER_EXIT.quota, retryAfterSeconds: -5 }, "defer quotaWaits 60"],
+    [{ diskFull: false, exitCode: REVIEWER_EXIT.quota, retryAfterSeconds: 1e9 }, "defer quotaWaits 86400"],
+    [{ diskFull: false, exitCode: REVIEWER_EXIT.transient }, "retry"],
+    [{ diskFull: false, exitCode: 137 }, "retry"], // killed (OOM)
+    [{ diskFull: false }, "retry"], // timeout: no exit code, or not a reviewer error at all
+  ];
+  for (const [failure, expected] of cases) assert.equal(step(failure), expected, JSON.stringify(failure));
 });

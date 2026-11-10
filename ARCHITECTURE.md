@@ -125,7 +125,7 @@ El token de instalación de la GitHub App (caduca a la hora) se pide en cada rev
 | `3` saturado | 502, 503 o 529 tras los reintentos del SDK | la **aplaza 5 min** (`deferrals` + 1), hasta 6 veces (30 min); después, `failed` |
 | `4` cupo agotado | el gateway marca su 403 con `x-otter-quota` (cupo del proveedor o su propio tope diario), con `retry-after` si sabe cuándo se reinicia. El revisor lo escribe en stdout (`ReviewerFailure`) | la **aplaza hasta el reinicio** + 1 min (acotado entre 1 min y 24 h, porque viene de un contenedor no fiable), o **5 h** si no se sabe (p. ej. sin saldo), hasta 4 veces (`quotaWaits`); después, `failed` |
 
-**Al aplazar,** el worker encola el mismo job más tarde y le pasa la fila, que sigue `running`. Si mientras tanto llega un push, gana el push y la fila vieja queda `stale`. Las revisiones que esperan el mismo momento (un reinicio de cupo) despiertan en el mismo minuto y salen por orden de llegada (`queuedAt`), de `WORKER_CONCURRENCY` en `WORKER_CONCURRENCY`: Graphile ordena solo por `run_at`, así que cada una se adelanta 1 µs por segundo que lleva en cola.
+**Al aplazar,** el worker encola el mismo job más tarde y le pasa la fila, que sigue `running`. Si mientras tanto llega un push (esté su job en cola o ya corriendo), gana el push; si se cerró la PR, no se aplaza. En ambos casos la fila vieja queda `stale`. Las revisiones que esperan el mismo momento (un reinicio de cupo) despiertan en el mismo minuto y salen por orden de llegada (`queuedAt`), de `WORKER_CONCURRENCY` en `WORKER_CONCURRENCY`: Graphile ordena solo por `run_at`, así que cada una se adelanta 1 µs por segundo que lleva en cola.
 | `1` transitorio | lo demás: 429 por minuto, 500, red, salida inválida del LLM | lanza el error y Graphile reintenta (3 intentos) |
 
 **Salida:** `ReviewerOutput` con el resumen, el riesgo y los hallazgos `{path, startLine?, line, side, severity, body, suggestion?, confidence?}`. `startLine`–`line` es el rango de líneas del hallazgo, como en el `/review` de PR-Agent; sin `startLine` es una sola línea.
@@ -328,12 +328,36 @@ Proxy propio (Hono, sin LiteLLM): la única salida de los revisores y el único 
 Cada fila de `reviews` es una petición procesada. La máquina de estados vive en un solo fichero, `packages/contracts/src/review-status.ts`, que comparten la api y el worker:
 
 ```
-(en cola: solo un job en Graphile, sin fila)
-        │ el worker la reclama (INSERT, job_id = id del job)
+webhook (push) o re-revisión forzada
+        │ add_job con la clave del PR: un push nuevo sustituye al job que aún espera
         ▼
-     running ──► published | stale | failed (con error)
-published | stale | failed ──► cancelled   (solo el admin, al forzar la re-revisión)
+job en cola (solo en Graphile, todavía sin fila)
+        │ el worker la reclama: INSERT con status = running y job_id = ese job
+        ▼
+     running ◄───────────────────────────────────────────────────────────────┐
+        │  job_id = el único job que puede terminarla                        │
+        │  · error transitorio: Graphile reintenta el MISMO job ─────────────┤
+        │  · LLM saturado o sin cupo: defer() crea un job para más tarde     │
+        │    y le pasa la fila (job_id = el nuevo; sigue running) ───────────┘
+        │
+        ├──► published  revisión publicada en GitHub
+        ├──► stale      el PR cambió de SHA, se cerró, o un push nuevo tiene ya la clave
+        └──► failed     error permanente, disco lleno, último intento, esperas agotadas,
+                        o huérfana (su job ya no existe; la marca la re-revisión)
+
+published | stale | failed ──► cancelled   (solo la re-revisión forzada, para volver a revisar ese SHA)
 ```
+
+Dónde se hace cada paso:
+
+| Paso | SQL | Fichero |
+|---|---|---|
+| Reclamar la fila (o retomarla, si es el mismo job) | `CLAIM_REVIEW_SQL` | `apps/worker/src/review.ts` |
+| La fila de un job aplazado cuyo SHA cambió por un push → `stale` | `SUPERSEDED_REVIEWS_SQL` | ídem |
+| Aplazar: job nuevo y traspaso de la fila | `DEFER_JOB_SQL`, `HAND_OVER_REVIEW_SQL` en `defer()` | ídem |
+| Terminar: `published`, `stale` o `failed` | `FINISH_REVIEW_SQL` en `finish()` | ídem |
+| Qué hacer con un fallo | `nextStep()` (función pura, con test) | `apps/worker/src/core.ts` |
+| Huérfana → `failed`, y después → `cancelled` | `FAIL_ORPHAN_SQL`, `CANCEL_REVIEW_SQL` | `apps/api/src/queue/enqueue-rereview.ts` |
 
 - **La BD obedece a la máquina:** cada `UPDATE` de estado lleva `WHERE status = ANY(sourcesOf(to))`, así que una transición ilegal no toca ninguna fila.
 - **Una sola revisión activa por SHA:** índice único parcial `(pull_request_id, sha) WHERE status <> 'cancelled'`. Las canceladas quedan como historial, con sus hallazgos.
