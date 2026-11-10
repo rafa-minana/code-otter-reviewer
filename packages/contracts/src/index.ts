@@ -61,7 +61,7 @@ export interface ReviewerOutput {
 /** Exit codes of the reviewer container: how the worker treats a failed review. */
 export const REVIEWER_EXIT = {
   transient: 1, // Graphile retries the job
-  permanent: 2, // retrying can't fix it (bad config, quota exhausted, request too big): fail now
+  permanent: 2, // retrying can't fix it (bad key or model, request too big, review budget spent): fail now
   overloaded: 3, // the provider is saturated: the worker postpones the job
   quota: 4, // the LLM quota ran out: the worker postpones the job until it resets
 } as const;

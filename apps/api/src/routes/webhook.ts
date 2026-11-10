@@ -57,7 +57,7 @@ async function handleWebhook(c: Context, deps: WebhookDeps): Promise<Response> {
     case "invalid":
       return c.text("invalid payload", HTTP_STATUS.badRequest);
     case "enqueue":
-      // If this throws, Hono answers 500 and GitHub redelivers.
+      // If this throws, Hono answers 500. GitHub doesn't redeliver on its own: the App's Advanced settings can.
       await deps.enqueueReview(decision.job, decision.delaySeconds);
       return c.body(null, HTTP_STATUS.accepted);
     case "cleanup":

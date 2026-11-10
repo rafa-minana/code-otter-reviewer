@@ -18,7 +18,7 @@ export interface Provider {
   tokensUsed(body: unknown): number;
   /** An error in the provider's own shape, so the AI SDK surfaces our message as-is. */
   errorBody(status: number, message: string): unknown;
-  /** The error means no credit or quota is left (daily, monthly, balance): retrying can't fix it. */
+  /** The error means no credit or quota is left (daily, monthly, balance): only waiting for the reset (or a top-up) fixes it. */
   quotaExhausted(status: number, body: unknown): boolean;
 }
 

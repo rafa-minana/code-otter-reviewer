@@ -128,7 +128,7 @@ export function createGateway(deps: GatewayDeps): Hono {
       );
 
     const json = parseObject(payload);
-    // A quota usually arrives as a retryable 429: our 403 tells the reviewer not to retry it (REVIEWER_EXIT.permanent).
+    // A quota usually arrives as a retryable 429: our marked 403 makes the reviewer stop retrying and the worker wait for the reset (REVIEWER_EXIT.quota).
     if (!upstream.ok && quotaExhausted(provider, upstream.status, json, upstream.headers))
       throw new Refusal(
         HTTP_STATUS.forbidden,
