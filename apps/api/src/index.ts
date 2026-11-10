@@ -18,6 +18,8 @@ const config = loadConfig(process.env);
 await runMigrations({ connectionString: config.databaseUrl });
 
 const pool = new pg.Pool({ connectionString: config.databaseUrl });
+// An idle client dropped by Postgres (e.g. a restart) emits this; unhandled, it would kill the process.
+pool.on("error", (err) => console.error(`postgres pool: ${err.message}`));
 
 const deps: AppDeps = {
   webhookSecret: config.webhookSecret,

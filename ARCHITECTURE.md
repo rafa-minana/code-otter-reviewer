@@ -40,7 +40,7 @@ pull_request.closed / caducidad 5 días / endpoint admin ──► job cleanup �
 
 | Servicio | Función | Notas |
 |---|---|---|
-| `api` | Recibe el webhook de GitHub y expone los endpoints `/admin` | Responde 200 rápido y solo encola. No tiene acceso al socket de Docker |
+| `api` | Recibe el webhook de GitHub y expone los endpoints `/admin` | Responde 200 rápido y solo encola. No tiene acceso al socket de Docker. Sin `env_file`: solo recibe `DATABASE_URL`, `GITHUB_WEBHOOK_SECRET` y `ADMIN_TOKEN` (da a internet: nunca la clave de la App, el secreto del gateway ni la del LLM) |
 | `worker` | Ejecuta los trabajos: git, contenedores revisores, publicación y limpieza | Se puede escalar a N réplicas. Monta `/var/run/docker.sock` y `/var/otter` |
 | `postgres` | Estado del sistema y cola de trabajos (Graphile Worker) | Única pieza con datos persistentes |
 | `gateway` | Proxy del LLM: única salida de los revisores y único servicio con la clave | Red `default` (internet) + `otter-reviewers`, alias `otter-gateway`. Sin `env_file`: solo recibe las variables `LLM_*` y `GATEWAY_*`. Sin puertos publicados, sistema de ficheros de solo lectura |
