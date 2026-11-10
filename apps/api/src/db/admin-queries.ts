@@ -1,15 +1,16 @@
 import type { Pool } from "pg";
 import { activeReviewSql, reviewJobKey } from "@otter/contracts";
 import type { PullRequestRef } from "../queue/enqueue-rereview.js";
+import { queuedJobSql } from "./jobs.js";
 
 /** Jobs per task: waiting (incl. retries), running, and given up after their last attempt. */
 const QUEUE_SQL = `
-  SELECT task_identifier AS task,
-    count(*) FILTER (WHERE locked_at IS NULL AND attempts < max_attempts)::int AS queued,
-    count(*) FILTER (WHERE locked_at IS NOT NULL)::int AS running,
-    count(*) FILTER (WHERE locked_at IS NULL AND attempts >= max_attempts)::int AS failed
-  FROM graphile_worker.jobs
-  GROUP BY task_identifier ORDER BY task_identifier`;
+  SELECT j.task_identifier AS task,
+    count(*) FILTER (WHERE ${queuedJobSql("j")})::int AS queued,
+    count(*) FILTER (WHERE j.locked_at IS NOT NULL)::int AS running,
+    count(*) FILTER (WHERE j.locked_at IS NULL AND NOT ${queuedJobSql("j")})::int AS failed
+  FROM graphile_worker.jobs j
+  GROUP BY j.task_identifier ORDER BY j.task_identifier`;
 
 const ACTIVE_REVIEWS_SQL = `
   SELECT r.owner, r.name AS repo, pr.number, rv.sha, rv.started_at
@@ -33,9 +34,9 @@ const REVIEWS_SQL = `
   ORDER BY rv.started_at DESC`;
 
 const PENDING_REVIEW_JOB_SQL = `
-  SELECT run_at, attempts, max_attempts, last_error
-  FROM graphile_worker.jobs
-  WHERE key = $1 AND locked_at IS NULL AND attempts < max_attempts`;
+  SELECT j.run_at, j.attempts, j.max_attempts, j.last_error
+  FROM graphile_worker.jobs j
+  WHERE j.key = $1 AND ${queuedJobSql("j")}`;
 
 export async function adminStatus(pool: Pool) {
   const [queue, reviews] = await Promise.all([

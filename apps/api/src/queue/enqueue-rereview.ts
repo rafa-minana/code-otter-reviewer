@@ -6,6 +6,7 @@ import {
   TASKS,
   type ReviewJob,
 } from "@otter/contracts";
+import { queuedJobSql } from "../db/jobs.js";
 import { withTransaction } from "../db/transaction.js";
 import { ADD_JOB_SQL, REVIEW_MAX_ATTEMPTS } from "./enqueue-review.js";
 
@@ -24,8 +25,7 @@ const LATEST_REVIEW_SQL = `
   SELECT pr.state, r.installation_id, rv.id AS review_id, rv.sha,
     coalesce(${activeReviewSql("rv")}, false) AS active,
     EXISTS (
-      SELECT 1 FROM graphile_worker.jobs j
-      WHERE j.key = $4 AND j.locked_at IS NULL AND j.attempts < j.max_attempts) AS queued
+      SELECT 1 FROM graphile_worker.jobs j WHERE j.key = $4 AND ${queuedJobSql("j")}) AS queued
   FROM repos r
   JOIN pull_requests pr ON pr.repo_id = r.id
   LEFT JOIN LATERAL (
