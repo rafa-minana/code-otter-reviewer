@@ -59,6 +59,7 @@ Graphile Worker es una librería de Node que usa tablas de Postgres como cola de
 - **Push durante una revisión:** se deja terminar, y antes de publicar se compara el SHA revisado con el último del PR. Si ya no es el último, la revisión se descarta, porque habrá otra encolada.
 - **Idempotencia:** GitHub puede reenviar eventos. Cada `(PR, SHA)` se revisa una sola vez.
 - **Reintentos:** automáticos, con espera exponencial (lo hace Graphile Worker). Máximo **3 intentos** (`max_attempts` en el `add_job`), porque cada intento repite todas las llamadas al LLM. Si falla el último, la review queda en BD con `result = 'failed'`.
+- **Estado en la PR (check run `code-otter`):** cada cambio de estado de la revisión (en cola, revisando, aplazada, publicada, sustituida, PR cerrada, fallida) encola un job `checks` en la cola con nombre `checks:<owner>/<repo>#<n>`, que los ejecuta de uno en uno y en orden. La api encola los suyos en la misma transacción que la revisión; el worker, desde `review.ts`. Los atiende un segundo runner del worker con concurrencia 2, así que no esperan a un hueco de revisión. Un 403/404/422 (permiso Checks sin aceptar) se registra y no se reintenta; un fallo aquí nunca afecta a la revisión.
 - **Encolado transaccional:** el estado del PR y el trabajo se guardan en la misma transacción, mediante `graphile_worker.add_job(..., job_key, job_key_mode => 'replace')` en SQL. La api ejecuta las migraciones de graphile al arrancar, así que puede encolar aunque el worker no haya arrancado.
 
 **Respuestas de `POST /webhook`** (Hono, `apps/api`):
@@ -311,14 +312,15 @@ Proxy propio (Hono, sin LiteLLM): la única salida de los revisores y el único 
 - Validar cada hallazgo contra los trozos del diff, porque GitHub solo deja comentar líneas que aparecen en él (si no, error 422). Un rango solo se publica como comentario multilínea si todas sus líneas están en el diff; si no, se comenta solo su última línea. Las sugerencias van en un bloque de código normal: las aplicables con un clic (` ```suggestion `, como el `/improve` de PR-Agent) quedan para más adelante, desactivadas por defecto.
 - Publicar **una única** review (`pulls.createReview`, de tipo `COMMENT` y nunca `APPROVE`) con todos los comentarios inline más un resumen: riesgo, resumen del LLM y ficheros no revisados, omitidos o borrados. Los hallazgos sin `confidence` llevan la marca "sin verificar".
 - Sin hallazgos: el resumen dice que no hay incidencias y que el PR está listo para mergear. Si algún fichero se quedó sin revisar por presupuesto, solo dice que no hay incidencias en los ficheros revisados.
+- El check run `code-otter` del SHA pasa a `success`, con el número de hallazgos y el riesgo, y enlaza a la review. Si falla, `neutral` con la primera línea del error: nunca bloquea un merge. Solo muestra el estado, sin posición en la cola. Textos en el idioma del `.otter.yaml` (`repos.language`; inglés hasta la primera revisión del repo); la lógica, en `apps/worker/src/checks.ts`.
 - Guardar en BD el id de la review y los hallazgos (publicados o no) en una sola sentencia. En v0, `handleReview` llama al motor en el mismo proceso, sin contenedor, con el diff de la API de GitHub.
 
 ## 7. Estado (Postgres)
 
 | Tabla | Contenido |
 |---|---|
-| `repos` | owner/repo, ruta del mirror, último uso |
-| `pull_requests` | repo, número, estado, último SHA revisado, fecha de caducidad |
+| `repos` | owner/repo, ruta del mirror, último uso, idioma del `.otter.yaml` (para el check run) |
+| `pull_requests` | repo, número, estado, último SHA encolado (`head_sha`: al llegar otro, su check pasa a sustituido), fecha de caducidad |
 | `reviews` | PR, SHA, estado, error, job de Graphile, inicio y fin, id de la review en GitHub |
 | `findings` | review, fichero, línea, severidad, texto, publicado |
 | `graphile_worker.*` | Cola de trabajos (la crea la librería) |
@@ -477,6 +479,7 @@ Entre procesos, el desacople ya lo dan la cola, los ficheros montados y `@otter/
 3. **v2:** revisión incremental completa, endpoints admin, barrendero, comandos `@otter`.
    - ✅ Endpoints admin, barrendero (con `git gc` de los mirrors), estado de la revisión y cuota de disco.
    - ✅ Reverse proxy (Caddy) en servidor: HTTPS y solo `/webhook` hacia fuera.
+   - ✅ Estado de la revisión en la PR con un check run `code-otter` (el botón Re-run irá con los comandos `@otter`).
 
 ## 13. Pendiente de verificar
 

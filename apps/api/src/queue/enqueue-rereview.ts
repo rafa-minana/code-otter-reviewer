@@ -8,6 +8,7 @@ import {
 } from "@otter/contracts";
 import { queuedJobSql } from "../db/jobs.js";
 import { withTransaction } from "../db/transaction.js";
+import { enqueueCheck } from "./enqueue-check.js";
 import { ADD_JOB_SQL, REVIEW_MAX_ATTEMPTS } from "./enqueue-review.js";
 
 export type PullRequestRef = Pick<ReviewJob, "owner" | "repo" | "number">;
@@ -92,6 +93,7 @@ export async function enqueueRereview(
       key,
       REVIEW_MAX_ATTEMPTS,
     ]);
+    await enqueueCheck(tx, job, job.sha, { state: "queued" });
     return "queued";
   });
 }

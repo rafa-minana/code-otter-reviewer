@@ -15,6 +15,15 @@ export type ReviewComment = Pick<
   "path" | "startLine" | "line" | "side" | "body"
 >;
 
+/** What a check run shows; the worker renders it from a CheckState (checks.ts). */
+export interface CheckRun {
+  status: "queued" | "in_progress" | "completed";
+  conclusion?: "success" | "neutral" | "skipped"; // only when completed
+  title: string;
+  summary: string; // markdown
+  detailsUrl?: string;
+}
+
 export interface GitHubClient {
   getPullRequest(job: ReviewJob): Promise<PullRequest>;
   /** File contents at `ref`, or null when it does not exist. */
@@ -27,6 +36,12 @@ export interface GitHubClient {
   ): Promise<number>;
   /** Short-lived installation token, used for git fetch (v1). */
   installationToken(job: ReviewJob): Promise<string>;
+  /** Sets the `code-otter` check run of `sha`: updates the current one, or starts a new one. */
+  upsertCheckRun(
+    repo: Pick<ReviewJob, "installationId" | "owner" | "repo">,
+    sha: string,
+    run: CheckRun,
+  ): Promise<void>;
 }
 
 export interface ContainerRunner {

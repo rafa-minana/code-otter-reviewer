@@ -4,6 +4,9 @@ import type { ReviewJob } from "@otter/contracts";
 import type { Config } from "./config.js";
 import type { GitHubClient } from "./ports.js";
 
+/** The check run's name in the PR's checks box (and for branch protection rules). */
+const CHECK_NAME = "code-otter";
+
 /**
  * The "diff" and "raw" media types make GitHub answer plain text (observed: typeof string),
  * but Octokit still types `data` as the JSON object. Check it instead of casting blindly.
@@ -24,7 +27,7 @@ export function octokitClient({
 }: Pick<Config, "appId" | "privateKey">): GitHubClient {
   // One Octokit per installation: auth-app caches its token until it expires.
   const clients = new Map<number, Octokit>();
-  const forJob = (job: ReviewJob) => {
+  const forJob = (job: Pick<ReviewJob, "installationId">) => {
     const { installationId } = job;
     if (!clients.has(installationId)) {
       clients.set(
@@ -90,6 +93,23 @@ export function octokitClient({
         token: string;
       };
       return token;
+    },
+
+    async upsertCheckRun(job, sha, run) {
+      const gh = forJob(job);
+      const { owner, repo } = job;
+      const { data } = await gh.checks.listForRef({ owner, repo, ref: sha, check_name: CHECK_NAME, filter: "latest" });
+      const current = data.check_runs[0];
+      const fields = {
+        status: run.status,
+        conclusion: run.conclusion,
+        details_url: run.detailsUrl,
+        output: { title: run.title, summary: run.summary },
+      };
+      // A finished run can't go back to queued (a re-review): that starts a new one, which GitHub shows instead.
+      const reopens = current?.status === "completed" && run.status !== "completed";
+      if (current && !reopens) await gh.checks.update({ owner, repo, check_run_id: current.id, ...fields });
+      else await gh.checks.create({ owner, repo, name: CHECK_NAME, head_sha: sha, ...fields });
     },
   };
 }

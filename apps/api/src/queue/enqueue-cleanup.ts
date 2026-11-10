@@ -1,12 +1,14 @@
 import type { Pool } from "pg";
 import { reviewJobKey, TASKS, type CleanupJob } from "@otter/contracts";
 import { withTransaction } from "../db/transaction.js";
+import { markSkipped } from "./enqueue-check.js";
 
 const CLOSE_PULL_REQUEST_SQL = `
   UPDATE pull_requests pr
   SET state = 'closed'
   FROM repos r
-  WHERE pr.repo_id = r.id AND r.owner = $1 AND r.name = $2 AND pr.number = $3`;
+  WHERE pr.repo_id = r.id AND r.owner = $1 AND r.name = $2 AND pr.number = $3
+  RETURNING pr.id, pr.head_sha, r.installation_id`;
 
 /** A review still waiting (e.g. in its push debounce) is pointless once the PR is closed. */
 const REMOVE_PENDING_REVIEW_SQL = `SELECT graphile_worker.remove_job($1)`;
@@ -15,13 +17,19 @@ const REMOVE_PENDING_REVIEW_SQL = `SELECT graphile_worker.remove_job($1)`;
 const ADD_CLEANUP_JOB_SQL = `
   SELECT graphile_worker.add_job($1, $2::json, job_key => $3)`;
 
-/** Closing the PR, dropping its pending review and queueing its cleanup happen in ONE transaction. */
+/** Closing the PR, dropping its pending review, its check run's state and its cleanup happen in ONE transaction. */
 export async function enqueueCleanup(
   pool: Pool,
   job: Required<CleanupJob>,
 ): Promise<void> {
   await withTransaction(pool, async (tx) => {
-    await tx.query(CLOSE_PULL_REQUEST_SQL, [job.owner, job.repo, job.number]);
+    const { rows } = await tx.query<{ id: string; head_sha: string | null; installation_id: string }>(
+      CLOSE_PULL_REQUEST_SQL,
+      [job.owner, job.repo, job.number],
+    );
+    const pr = rows[0];
+    if (pr?.head_sha)
+      await markSkipped(tx, { ...job, installationId: Number(pr.installation_id) }, pr.id, pr.head_sha, "closed");
     await tx.query(REMOVE_PENDING_REVIEW_SQL, [reviewJobKey(job)]);
     await tx.query(ADD_CLEANUP_JOB_SQL, [
       TASKS.cleanup,

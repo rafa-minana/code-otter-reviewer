@@ -14,5 +14,20 @@
   "noIssuesInReviewed": "No issues found in the reviewed files, but some files were not reviewed (see below).",
   "notReviewed": "Not reviewed (over the size budget)",
   "filtered": "Skipped by filter",
-  "deleted": "Deleted files"
+  "deleted": "Deleted files",
+  "check.queued": "Queued",
+  "check.queued.summary": "Waiting for a free reviewer. This check updates when the review starts.",
+  "check.in_progress": "Reviewing",
+  "check.in_progress.summary": "The review is running.",
+  "check.deferred.overloaded": "Postponed: the AI provider is overloaded",
+  "check.deferred.quota": "Postponed: the AI quota is used up",
+  "check.deferred.summary": "It will be retried around {time} UTC.",
+  "check.published": "Review posted: {findings} findings",
+  "check.published.summary": "See the review",
+  "check.superseded": "Skipped: there is a newer commit",
+  "check.superseded.summary": "The newest commit of this pull request is reviewed instead.",
+  "check.closed": "Skipped: the pull request was closed",
+  "check.closed.summary": "Closed pull requests are not reviewed.",
+  "check.failed": "Could not review this commit",
+  "check.failed.summary": "Push a new commit to try again, or ask the code-otter admin to re-run it."
 }

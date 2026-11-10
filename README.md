@@ -113,9 +113,11 @@ Fill in the form like this:
 | **Webhook → Active** | ✅ checked |
 | **Webhook URL** | The URL from step 1 |
 | **Webhook secret** | The secret from step 1 |
-| **Repository permissions** | **Contents**: Read-only · **Pull requests**: Read and write · **Metadata**: Read-only (selected automatically) |
+| **Repository permissions** | **Contents**: Read-only · **Pull requests**: Read and write · **Checks**: Read and write · **Metadata**: Read-only (selected automatically) |
 | **Subscribe to events** | ✅ **Pull request** |
 | **Where can this GitHub App be installed?** | **Only on this account** (see [Can someone else use it?](#can-someone-else-use-it)) |
+
+Checks lets the App show the review's state on the PR (Queued, Reviewing, Published…) as a `code-otter` check. If your App was created before it was added, add the permission and accept it in each installation (**Settings** → **GitHub Apps** → **Configure**); until then reviews still work, just without the check.
 
 Click **Create GitHub App**. On the page that opens:
 
@@ -354,7 +356,7 @@ Heads-up: the worker mounts `/var/run/docker.sock` to launch a sandboxed contain
 - **Each PR's changes, title and description are sent to your LLM provider.** Pick one you're comfortable sharing that code with.
 - Only webhooks with a **valid GitHub signature** are accepted.
 - The PR's title, description and code are treated as **untrusted**. The AI is told to ignore any instructions hidden in them, as a defence against prompt injection.
-- The App asks for the **minimum permissions**: read the code and write reviews.
+- The App asks for the **minimum permissions**: read the code, write reviews and show the review's state as a check.
 - The container that reads the PR's code has **no internet access and no API keys**. It reaches the LLM only through the `gateway`, with a pass that works for that one review, expires in 20 minutes and has a spending cap (150 requests and 3M tokens by default; see `.env.example`).
 - Secrets live only in `.env`, and both `.env` and `*.pem` are git-ignored.
 

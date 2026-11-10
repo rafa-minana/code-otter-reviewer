@@ -14,6 +14,7 @@ import {
   parseReviewerOutput,
   type Wait,
 } from "./core.js";
+import { queueCheck, saveLanguage } from "./checks.js";
 import { inTransaction } from "./db/transaction.js";
 import { prDiff } from "./git/diff.js";
 import { withRepoLock } from "./git/lock.js";
@@ -82,7 +83,7 @@ const DEFER_JOB_SQL = `
     run_at       => at - (at - $6::timestamptz) / 1000000,
     job_key      => $4,
     max_attempts => $5
-  )).id
+  )).id, at
   FROM wake`;
 
 /** The row stays running and moves to the new job, which claims it when it runs. */
@@ -135,6 +136,8 @@ export async function handleReview(
     );
     return;
   }
+  await queueCheck(helpers, job, { state: "in_progress" });
+  // A stale review sets no check: the newer push or the close that made it stale already did (api).
   const finish = async (
     result: Result,
     {
@@ -158,7 +161,10 @@ export async function handleReview(
       ]),
     );
   };
-  const fail = (error: string) => finish("failed", { error });
+  const fail = async (error: string) => {
+    await finish("failed", { error });
+    await queueCheck(helpers, job, { state: "failed", error });
+  };
   const finalAttempt = helpers.job.attempts >= helpers.job.max_attempts;
 
   try {
@@ -185,6 +191,7 @@ export async function handleReview(
     const output = parseReviewerOutput(
       await runner.runReviewer({ input, finalAttempt }, worktree, reviewId),
     );
+    await saveLanguage(helpers, job, output.language);
 
     if (isStale(job.sha, (await gh.getPullRequest(job)).headSha))
       return await finish("stale");
@@ -203,6 +210,12 @@ export async function handleReview(
         ...f,
         published: isPublished.has(findingKey(f)),
       })),
+    });
+    await queueCheck(helpers, job, {
+      state: "published",
+      githubReviewId,
+      findings: published.length,
+      risk: output.risk,
     });
   } catch (err) {
     const error = (err as Error).message;
@@ -223,8 +236,9 @@ export async function handleReview(
       const outcome = await defer(helpers, job, reviewId, wait, seconds);
       if (outcome === "superseded") await finish("stale");
       else if (outcome === "gave_up") await fail(`LLM ${why}: gave up after waiting ${wait.max} times: ${error}`);
+      else await queueCheck(helpers, job, { state: "deferred", why, until: outcome.until });
       helpers.logger.warn(
-        `LLM ${why} for ${target}: ${outcome === "deferred" ? `retry in ${Math.round(seconds / 60)} min` : outcome}`,
+        `LLM ${why} for ${target}: ${typeof outcome === "string" ? outcome : `retry in ${Math.round(seconds / 60)} min`}`,
       );
       return;
     }
@@ -243,7 +257,7 @@ async function defer(
   reviewId: string,
   wait: Wait,
   seconds: number,
-): Promise<"deferred" | "superseded" | "gave_up"> {
+): Promise<{ until: string } | "superseded" | "gave_up"> {
   const waited = job[wait.counter] ?? 0;
   return helpers.withPgClient((pg) =>
     inTransaction(pg, async () => {
@@ -253,7 +267,7 @@ async function defer(
         return "superseded";
       if (waited >= wait.max) return "gave_up";
       const queuedAt = job.queuedAt ?? new Date(helpers.job.created_at).toISOString();
-      const { rows } = await pg.query<{ id: string }>(DEFER_JOB_SQL, [
+      const { rows } = await pg.query<{ id: string; at: Date }>(DEFER_JOB_SQL, [
         TASKS.review,
         JSON.stringify({ ...job, [wait.counter]: waited + 1, queuedAt }),
         seconds,
@@ -262,7 +276,7 @@ async function defer(
         queuedAt,
       ]);
       await pg.query(HAND_OVER_REVIEW_SQL, [reviewId, rows[0].id]);
-      return "deferred";
+      return { until: rows[0].at.toISOString() };
     }),
   );
 }

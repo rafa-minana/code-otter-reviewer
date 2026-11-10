@@ -14,5 +14,20 @@
   "noIssuesInReviewed": "No se han encontrado incidencias en los ficheros revisados, pero algunos no se han revisado (ver abajo).",
   "notReviewed": "No revisados (superan el presupuesto)",
   "filtered": "Omitidos por filtro",
-  "deleted": "Ficheros borrados"
+  "deleted": "Ficheros borrados",
+  "check.queued": "En cola",
+  "check.queued.summary": "Esperando un revisor libre. Este check se actualizará cuando empiece la revisión.",
+  "check.in_progress": "Revisando",
+  "check.in_progress.summary": "La revisión está en marcha.",
+  "check.deferred.overloaded": "Aplazada: el proveedor de IA está saturado",
+  "check.deferred.quota": "Aplazada: se agotó el cupo de IA",
+  "check.deferred.summary": "Se reintentará hacia las {time} UTC.",
+  "check.published": "Revisión publicada: {findings} hallazgos",
+  "check.published.summary": "Ver la revisión",
+  "check.superseded": "Omitida: hay un commit más nuevo",
+  "check.superseded.summary": "Se revisa el commit más reciente de esta PR.",
+  "check.closed": "Omitida: la PR se cerró",
+  "check.closed.summary": "Las PRs cerradas no se revisan.",
+  "check.failed": "No se pudo revisar este commit",
+  "check.failed.summary": "Haz push de un commit nuevo para reintentarlo, o pide al administrador de code-otter que la relance."
 }

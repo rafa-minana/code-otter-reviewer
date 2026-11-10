@@ -6,6 +6,7 @@ CREATE TABLE repos (
   name         text NOT NULL,
   installation_id bigint NOT NULL,
   mirror_path  text,
+  language     text,   -- of its .otter.yaml, saved by the last review: the check run's texts use it
   last_used_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (owner, name)
 );
@@ -16,6 +17,7 @@ CREATE TABLE pull_requests (
   number            integer NOT NULL,
   state             text NOT NULL DEFAULT 'open',
   last_reviewed_sha text,
+  head_sha          text,  -- the last SHA queued for review
   expires_at        timestamptz,
   UNIQUE (repo_id, number)
 );

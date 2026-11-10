@@ -79,7 +79,26 @@ export const TASKS = {
   review: "review",
   cleanup: "cleanup",
   janitor: "janitor",
+  checks: "checks",
 } as const;
+
+/** What the PR's `code-otter` check run shows: only the state of its review (the worker renders it). */
+export type CheckState =
+  | { state: "queued" }
+  | { state: "in_progress" }
+  | { state: "deferred"; why: "overloaded" | "quota"; until: string } // until: ISO time it runs again
+  | { state: "published"; githubReviewId: number; findings: number; risk: ReviewerOutput["risk"] }
+  | { state: "superseded" } // a newer commit is reviewed instead
+  | { state: "closed" }
+  | { state: "failed"; error: string };
+
+/** One state change of the check run on `sha`. */
+export type CheckJob = Pick<ReviewJob, "installationId" | "owner" | "repo" | "number" | "sha"> & CheckState;
+
+/** Graphile named queue: a PR's check jobs run one at a time, in the order api and worker queued them. */
+export const checkQueueName = (j: Pick<ReviewJob, "owner" | "repo" | "number">) =>
+  `checks:${j.owner}/${j.repo}#${j.number}`;
+export const CHECK_MAX_ATTEMPTS = 5;
 
 /**
  * Values of LLM_PROVIDER: the reviewer picks its AI SDK provider by it, the gateway its upstream and auth.
