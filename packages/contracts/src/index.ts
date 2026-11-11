@@ -71,6 +71,39 @@ export interface ReviewerFailure {
   retryAfterSeconds?: number; // until the quota resets, when the gateway knows it
 }
 
+/** Per LLM generate call (the review, then the verification), tool loop included. Slow free models need minutes per step. */
+export const LLM_CALL_TIMEOUT_MS = 20 * 60_000;
+/** How long a reviewer container may live: both calls back to back, plus startup, linters and the answer. */
+export const REVIEW_CONTAINER_TIMEOUT_MS = 2 * LLM_CALL_TIMEOUT_MS + 5 * 60_000;
+
+/**
+ * The only variables a reviewer container gets. Never the whole environment: the GitHub key and the
+ * database URL must not reach it. LLM_BASE_URL and LLM_API_KEY are the gateway's URL and the review's token.
+ */
+export const REVIEWER_LLM_ENV = [
+  "LLM_PROVIDER",
+  "LLM_MODEL",
+  "LLM_API_KEY",
+  "LLM_BASE_URL",
+  "LLM_REASONING",
+] as const;
+export type ReviewerLlmVar = (typeof REVIEWER_LLM_ENV)[number];
+
+/** Worker → launcher (POST /review): run this review over the worktree at `worktree`, relative to the data volume. */
+export interface LaunchRequest {
+  reviewId: string;
+  worktree: string; // worktrees/<owner>/<repo>/pr<n>/<sha>
+  env: Partial<Record<ReviewerLlmVar, string>>;
+  request: ReviewerRequest;
+}
+
+/** Launcher → worker: what the reviewer container did. `exitCode` null: it never finished (timeout, output too big). */
+export interface LaunchResult {
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+}
+
 /** Set by the gateway on a refusal for an exhausted quota (its daily cap or the provider's); `retry-after` may come with it. */
 export const QUOTA_EXHAUSTED_HEADER = "x-otter-quota";
 

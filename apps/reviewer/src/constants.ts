@@ -12,8 +12,6 @@ export const RISKS = ["low", "medium", "high"] as const;
 
 /** Per LLM step: a hung provider fails the attempt (and Graphile retries) instead of blocking the worker forever. */
 export const LLM_TIMEOUT_MS = 250_000;
-/** Per generate call, tool loop included: review + verify stay under the worker's 15 min container timeout. */
-export const LLM_TOTAL_TIMEOUT_MS = 6 * 60_000;
 
 /** Read-only repo tools (ARCHITECTURE.md §5): each step is one more LLM call, so they are capped. */
 export const TOOL_MAX_STEPS = 10;

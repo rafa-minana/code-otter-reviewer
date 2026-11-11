@@ -33,7 +33,7 @@ In plain words:
 5. **A second AI pass double-checks each finding** and scores it from 0 to 10. Only the ones scoring 7 or more get posted, so you get less noise.
 6. **It posts one review** on your pull request. Each commit is reviewed only once.
 
-Everything runs in Docker: an `api`, a `worker`, a `gateway` and a `postgres` database. Each review runs in its own short-lived, locked-down container: it can read the PR's code but can't touch your GitHub token, your database or anything else. It has **no internet access and never sees your LLM API key**: its only way out is the `gateway`, which adds the key, only allows the calls a review makes and stops a review that spends too much.
+Everything runs in Docker: an `api`, a `worker`, a `launcher`, a `gateway` and a `postgres` database. Each review runs in its own short-lived, locked-down container: it can read the PR's code but can't touch your GitHub token, your database or anything else. It has **no internet access and never sees your LLM API key**: its only way out is the `gateway`, which adds the key, only allows the calls a review makes and stops a review that spends too much.
 
 ---
 
@@ -73,7 +73,7 @@ flowchart TD
 ### Before you start
 
 You'll need:
-- **Docker** with Docker Compose.
+- **Docker** Engine 26 or later (Docker Desktop 4.29+), with Docker Compose.
 - A **GitHub account**, personal or an organization, to create the App.
 - An **LLM API key**: Anthropic, OpenAI, Gemini, or anything OpenAI-compatible such as [OpenRouter](https://openrouter.ai), which has free models for testing.
 
@@ -221,7 +221,7 @@ docker compose build reviewer
 docker compose up --build
 ```
 
-> 💡 Each review runs in its own throwaway container from the `code-otter-reviewer` image. Compose doesn't build it on `up`, so run `docker compose build reviewer` the first time and after every update. If you forget, the worker refuses to start and tells you so.
+> 💡 Each review runs in its own throwaway container from the `code-otter-reviewer` image. Compose doesn't build it on `up`, so run `docker compose build reviewer` the first time and after every update. If you forget, the launcher refuses to start and tells you so.
 
 You're ready when you see `api listening on :3000` and `Worker connected and looking for jobs`.
 
@@ -347,7 +347,9 @@ curl -H "Authorization: Bearer $ADMIN_TOKEN" localhost:3001/admin/status
 | `DELETE /admin/repos/:owner/:repo` | Removes the repo's copy, checkouts and history (202) |
 | `POST /admin/gc` | Runs the janitor now (202) |
 
-Heads-up: the worker mounts `/var/run/docker.sock` to launch a sandboxed container for each review (no GitHub token, read-only code, no privileges). Access to the Docker socket is effectively root on the host, so keep that in mind on a shared server.
+Heads-up: the `launcher` mounts `/var/run/docker.sock` to start a sandboxed container for each review (no GitHub token, read-only code, no privileges). Access to the Docker socket is effectively root on the host, so it's the only service that has it: it does nothing but start reviewers on its own fixed terms, and only the worker can reach it. The worker runs as an unprivileged user without the socket.
+
+Upgrading from a version before the launcher: repo copies now live in the `otter-data` Docker volume instead of the host's `/var/otter`. They are re-downloaded on the next review; once it works you can delete the old `/var/otter` on the host.
 
 ---
 
@@ -357,7 +359,7 @@ Heads-up: the worker mounts `/var/run/docker.sock` to launch a sandboxed contain
 - Only webhooks with a **valid GitHub signature** are accepted.
 - The PR's title, description and code are treated as **untrusted**. The AI is told to ignore any instructions hidden in them, as a defence against prompt injection.
 - The App asks for the **minimum permissions**: read the code, write reviews and show the review's state as a check.
-- The container that reads the PR's code has **no internet access and no API keys**. It reaches the LLM only through the `gateway`, with a pass that works for that one review, expires in 20 minutes and has a spending cap (150 requests and 3M tokens by default; see `.env.example`).
+- The container that reads the PR's code has **no internet access and no API keys**. It reaches the LLM only through the `gateway`, with a pass that works for that one review, expires in 50 minutes (a little longer than a review container may live) and has a spending cap (150 requests and 3M tokens by default; see `.env.example`).
 - Secrets live only in `.env`, and both `.env` and `*.pem` are git-ignored.
 
 ---
@@ -388,8 +390,8 @@ Coming next: incremental reviews and `@otter` commands (v2). See [ARCHITECTURE.m
 | `required variable OTTER_DOMAIN is missing a value` | You started `docker-compose.server.yml` without setting `OTTER_DOMAIN` in `.env` |
 | On a server, GitHub can't connect or reports a TLS error | Caddy couldn't get the certificate: the domain must point at the server and ports 80 and 443 must be open. See `docker compose logs proxy` |
 | Webhooks arrive but nothing gets reviewed | Is the App installed on that repo, with the permissions from step 2? A commit that was already reviewed won't be reviewed again |
-| The worker won't start: `reviewer image "code-otter-reviewer" not found` | Build it: `docker compose build reviewer` (needed once, and after every update) |
-| The worker won't start: `reviewer network "…" must exist and be internal` | Start everything with `docker compose up`, which creates the `otter-reviewers` network. If your `.env` still has `REVIEWER_NETWORK=bridge` from an older version, change it to `otter-reviewers` |
+| The launcher won't start: `reviewer image "code-otter-reviewer" not found` | Build it: `docker compose build reviewer` (needed once, and after every update) |
+| The launcher won't start: `reviewer network "…" must exist and be internal` | Start everything with `docker compose up`, which creates the `otter-reviewers` network. If your `.env` still has `REVIEWER_NETWORK=bridge` from an older version, change it to `otter-reviewers` |
 | `GATEWAY_SECRET must be at least 32 characters` | Add it to `.env`: `openssl rand -hex 32` |
 | A review fails with `otter gateway: review budget exhausted` | The review hit its spending cap. Huge PRs may need more: raise `GATEWAY_REVIEW_MAX_REQUESTS` or `GATEWAY_REVIEW_MAX_TOKENS` |
 | A review stays in progress for hours, then fails with `LLM quota: gave up` | Your LLM quota or credit ran out (e.g. OpenRouter's free models per day). Each review waits until the quota resets (or 5 h when unknown, e.g. no credit), up to 4 times. Top up or wait, then re-review (`POST …/pulls/:n/review`) |

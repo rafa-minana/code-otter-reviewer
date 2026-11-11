@@ -1,5 +1,4 @@
-# Values come from .env; each service lists only what it needs (the worker takes all of .env: with the
-# Docker socket it is root on the host anyway).
+# Values come from .env; each service lists only what it needs (the worker takes all of .env).
 x-database: &database
   DATABASE_URL: ${DATABASE_URL:-postgres://otter:${POSTGRES_PASSWORD:-otter}@postgres:5432/otter}
 
@@ -36,14 +35,37 @@ services:
     environment:
       <<: *database
       LLM_API_KEY: "" # the real key lives only in the gateway; reviewers get a per-review token
-    user: root # needs the Docker socket; see ARCHITECTURE.md §13 (socket proxy)
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - /var/otter:/var/otter # same path as on the host: reviewers are sibling containers
+      - otter-data:/var/otter # the launcher mounts each worktree from it into its reviewer
+    networks: [default, launcher]
     restart: unless-stopped
     depends_on:
       postgres: { condition: service_healthy }
       gateway: { condition: service_healthy }
+      launcher: { condition: service_healthy }
+
+  # The only service with the Docker socket (= root on the host): it runs reviewer containers on its own
+  # terms, for the worker alone. Nothing secret in its environment.
+  launcher:
+    build: { context: ., args: { APP: launcher } }
+    environment:
+      REVIEWER_IMAGE: ${REVIEWER_IMAGE:-}
+      REVIEWER_NETWORK: ${REVIEWER_NETWORK:-}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-}
+      DOCKER_CONFIG: /tmp/.docker # the docker CLI's config dir, on a read-only filesystem
+    user: root
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      launcher: { aliases: [otter-launcher] }
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8090/healthz"]
+      interval: 5s
 
   gateway:
     build: { context: ., args: { APP: gateway } }
@@ -76,6 +98,12 @@ networks:
   reviewers:
     name: otter-reviewers
     internal: true
+  # Worker ↔ launcher only: neither the internet-facing api nor the reviewers can reach the socket's owner.
+  launcher:
+    name: otter-launcher
+    internal: true
 
 volumes:
   pgdata:
+  otter-data:
+    name: otter-data # fixed: the launcher names it in `docker run --mount`

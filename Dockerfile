@@ -5,8 +5,10 @@ ARG TARGETARCH
 ARG GITLEAKS_VERSION=8.30.1
 ARG GITLEAKS_SHA256_X64=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
 ARG GITLEAKS_SHA256_ARM64=e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080
+# The worker runs as node: the otter-data volume, when first created, takes /var/otter's owner from the image.
 RUN case "$APP" in \
-      worker) apk add --no-cache git docker-cli ;; \
+      worker) apk add --no-cache git && mkdir -p /var/otter && chown node:node /var/otter ;; \
+      launcher) apk add --no-cache docker-cli ;; \
       reviewer) apk add --no-cache git ripgrep \
         && case "$TARGETARCH" in \
              arm64) arch=arm64 sha=$GITLEAKS_SHA256_ARM64 ;; \

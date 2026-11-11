@@ -1,4 +1,5 @@
 // Gateway tuning knobs (ARCHITECTURE.md §5, "Gateway del LLM").
+import { REVIEW_CONTAINER_TIMEOUT_MS } from "@otter/contracts";
 
 export const PORT = 8080;
 
@@ -8,9 +9,9 @@ export const MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
 /** Above the reviewer's 250 s per step, so the reviewer's own timeout always fires first. */
 export const UPSTREAM_TIMEOUT_MS = 5 * 60_000;
 
-/** The reviewer container lives 15 min at most; the margin covers clock skew and the last response. */
-export const REVIEW_TOKEN_TTL_MS = 20 * 60_000;
-/** A 429 asking to wait longer than a reviewer container lives (15 min) is a quota, not a blip. */
+/** Outlives the reviewer container; the margin covers clock skew and the last response. */
+export const REVIEW_TOKEN_TTL_MS = REVIEW_CONTAINER_TIMEOUT_MS + 5 * 60_000;
+/** A 429 asking to wait longer than this is a quota, not a blip: the worker postpones instead of holding a slot. */
 export const QUOTA_RETRY_AFTER_SECONDS = 15 * 60;
 export const GATEWAY_SECRET_MIN_LENGTH = 32;
 

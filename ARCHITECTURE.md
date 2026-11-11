@@ -41,11 +41,12 @@ pull_request.closed / caducidad 5 días / endpoint admin ──► job cleanup �
 | Servicio | Función | Notas |
 |---|---|---|
 | `api` | Recibe el webhook de GitHub y expone los endpoints `/admin` | Responde 200 rápido y solo encola. No tiene acceso al socket de Docker. Sin `env_file`: solo recibe `DATABASE_URL`, `GITHUB_WEBHOOK_SECRET` y `ADMIN_TOKEN` (da a internet: nunca la clave de la App, el secreto del gateway ni la del LLM) |
-| `worker` | Ejecuta los trabajos: git, contenedores revisores, publicación y limpieza | Se puede escalar a N réplicas. Monta `/var/run/docker.sock` y `/var/otter` |
+| `worker` | Ejecuta los trabajos: git, revisiones (vía el launcher), publicación y limpieza | Se puede escalar a N réplicas (el launcher no pasa de `WORKER_CONCURRENCY` revisores a la vez: súbelo a la suma). Monta el volumen `otter-data` en `/var/otter`. Sin socket de Docker y como usuario `node` |
+| `launcher` | Único servicio con `/var/run/docker.sock`: lanza un contenedor revisor por petición del worker (`POST /review`) | Red `otter-launcher` (`internal`), compartida solo con el worker. Él decide todos los flags de `docker run`; el worker solo elige el worktree (validado) y las variables `LLM_*`. Sin `env_file` ni secretos. Sistema de ficheros de solo lectura |
 | `postgres` | Estado del sistema y cola de trabajos (Graphile Worker) | Única pieza con datos persistentes |
 | `gateway` | Proxy del LLM: única salida de los revisores y único servicio con la clave | Red `default` (internet) + `otter-reviewers`, alias `otter-gateway`. Sin `env_file`: solo recibe las variables `LLM_*` y `GATEWAY_*`. Sin puertos publicados, sistema de ficheros de solo lectura |
 | `proxy` | Caddy delante de la api, **solo en servidor** (`docker-compose.server.yml` + `Caddyfile`): HTTPS automático para `OTTER_DOMAIN` y solo deja pasar `POST /webhook` hacia `api:3000` | Publica 80 y 443; con él, el `3000` de la api deja de publicarse (`ports: !override`). Sistema de ficheros de solo lectura; los certificados van en el volumen `caddy_data` |
-| `reviewer` | **Imagen**, no servicio: el worker la lanza en cada revisión | Sin token de GitHub ni clave del LLM. Red `otter-reviewers` (`internal`): sin internet, solo alcanza el gateway |
+| `reviewer` | **Imagen**, no servicio: el launcher la lanza en cada revisión | Sin token de GitHub ni clave del LLM. Red `otter-reviewers` (`internal`): sin internet, solo alcanza el gateway |
 
 ## 3. Escucha y cola (Graphile Worker sobre Postgres)
 
@@ -77,7 +78,7 @@ Graphile Worker es una librería de Node que usa tablas de Postgres como cola de
 ## 4. Git: un mirror por repo y un worktree por PR
 
 ```
-/var/otter/                         # misma ruta en el host y en el worker
+/var/otter/                         # el volumen otter-data, montado en el worker
 ├── mirrors/<owner>/<repo>.git          # clon bare (--filter=blob:none), una vez por repo
 ├── worktrees/<owner>/<repo>/pr<n>/<sha>/  # checkout del SHA del PR; solo el último por PR
 └── (volúmenes Docker) otter-pr-<owner>-<repo>-<n>, otter-deps-<owner>-<repo>-<lockhash>
@@ -95,7 +96,7 @@ Los pasos 1 a 4 van con un **advisory lock de Postgres por repo**, para que dos 
 
 **Clon parcial y token:** con `blob:none`, git descarga el contenido de los ficheros bajo demanda (al crear el worktree o calcular el diff), así que esos comandos también necesitan el token. Va en variables de entorno (`GIT_CONFIG_*` → `http.extraHeader`), nunca en los argumentos ni en la config del mirror. **Pendiente para el plan 3:** sin token dentro del revisor, `git log`/`git blame` no podrán descargar contenido que falte.
 
-**Misma ruta en todos lados:** los revisores son contenedores "hermanos" del worker, así que Docker resuelve sus volúmenes con rutas del host. Por eso `/var/otter` se monta en el worker en la misma ruta.
+**Volumen, no carpeta del host:** el launcher monta en el revisor solo el worktree, como subruta del volumen (`--mount type=volume,src=otter-data,volume-subpath=worktrees/…,readonly`, Docker Engine 26+). Docker resuelve la subruta dentro del volumen, así que un symlink plantado por un worker comprometido no monta nada más del host. Comprobar la ruta con `realpath` antes de montar no bastaría: el worker podría cambiar el symlink entre la comprobación y el montaje.
 
 El token de instalación de la GitHub App (caduca a la hora) se pide en cada revisión y nunca entra al revisor.
 
@@ -103,10 +104,10 @@ El token de instalación de la GitHub App (caduca a la hora) se pide en cada rev
 
 ## 5. Contenedor revisor
 
-- **Ciclo de vida:** `docker run --rm` en cada revisión, para usar siempre la última imagen sin arrastrar estado viejo. Lo lanza el worker con el CLI de Docker (`worker/runner.ts`), por el socket montado; se llama `otter-review-<id de la review>`.
-- **Aislamiento (hecho en v1, plan 3):** `--read-only` + `/tmp` en tmpfs, `--cap-drop ALL`, `no-new-privileges`, usuario sin privilegios, límites de memoria, CPU, procesos y 15 min de tiempo, y `--pull never`: la imagen se construye en local (`docker compose build reviewer`) y nunca se descarga de un registro. El worktree se monta en `/repo` en solo lectura; nada más del host.
+- **Ciclo de vida:** `docker run --rm` en cada revisión, para usar siempre la última imagen sin arrastrar estado viejo. Lo lanza el launcher con el CLI de Docker (`launcher/docker.ts`) cuando el worker se lo pide (`worker/runner.ts`, `POST /review`); se llama `otter-review-<id de la review>`. Si el worker cuelga la conexión (reinicio), el launcher borra el contenedor.
+- **Aislamiento (hecho en v1, plan 3):** `--read-only` + `/tmp` en tmpfs, `--cap-drop ALL`, `no-new-privileges`, usuario sin privilegios, límites de memoria, CPU, procesos y tiempo (`REVIEW_CONTAINER_TIMEOUT_MS`, 45 min) de tiempo, y `--pull never`: la imagen se construye en local (`docker compose build reviewer`) y nunca se descarga de un registro. El worktree se monta en `/repo` en solo lectura; nada más del host.
 - **Entorno:** solo las variables `LLM_*` de una lista cerrada (`REVIEWER_LLM_ENV`), pasadas por nombre (`-e LLM_API_KEY`), así que sus valores no aparecen en los argumentos. Nunca el token de GitHub ni la URL de la base de datos.
-- **Red y clave (hecho en v1, plan 6):** el contenedor va a la red `otter-reviewers` (`REVIEWER_NETWORK`), que docker compose crea como `internal`: sin ruta a internet ni DNS externo. El worker le pone `LLM_BASE_URL=http://otter-gateway:8080` y `LLM_API_KEY=<token de la revisión>`, así que la clave real nunca entra. El worker **falla cerrado**: no arranca si esa red no existe o no es interna (`ensureReviewerNetwork`), ni sin `GATEWAY_SECRET`.
+- **Red y clave (hecho en v1, plan 6):** el contenedor va a la red `otter-reviewers` (`REVIEWER_NETWORK`), que docker compose crea como `internal`: sin ruta a internet ni DNS externo. El worker le pone `LLM_BASE_URL=http://otter-gateway:8080` y `LLM_API_KEY=<token de la revisión>`, así que la clave real nunca entra. **Falla cerrado:** el launcher no arranca si esa red no existe o no es interna (`ensureDocker`), y el worker no arranca sin `GATEWAY_SECRET`.
 - **Volumen del PR:** lo que se quiere reutilizar entre revisiones (estado, índices) vive en este volumen, no en el contenedor.
 - **Caché de dependencias por repo:** con la clave en el hash del lockfile.
 
@@ -237,7 +238,7 @@ por cada trozo del diff:
   - el bucle para al llamar a `submit`;
   - el paso 11 solo permite `submit`;
   - su entrada se valida con el mismo schema de zod.
-- **Límites:** 10 pasos de herramienta por llamada, y 6 minutos en total por llamada (revisión + verificación < 15 minutos del contenedor).
+- **Límites:** 10 pasos de herramienta por llamada, y 20 minutos en total por llamada (`LLM_CALL_TIMEOUT_MS`). El contenedor vive las dos llamadas seguidas más 5 minutos de margen, y el token del gateway 5 más.
 - El modelo solo **pide** herramientas, y únicamente existen las que definimos: todas de solo lectura, sin escritura ni ejecución arbitraria.
 - Descartado por ahora: usar un agente ya hecho dentro del contenedor (Codex app-server, opencode o Claude Agent SDK). Son más pesados, traen herramientas de escritura que habría que desactivar, la salida no es nuestro formato y algunos tiran hacia su propio proveedor.
 
@@ -290,7 +291,7 @@ Proxy propio (Hono, sin LiteLLM): la única salida de los revisores y el único 
 - **openai / openai-compatible:** 402 (sin saldo, OpenRouter), `insufficient_quota` (OpenAI) o 429 con `per-day` en el mensaje (`free-models-per-day` de OpenRouter; su `per-min` sigue siendo reintentable);
 - **anthropic:** 402 `billing_error`, o 400 con `credit balance` o `usage limits` (límite de gasto mensual);
 - **gemini:** 429 con `PerDay` en los detalles de la cuota;
-- **todos:** un 429 que pide esperar más de 15 minutos (lo que vive el contenedor), como el límite diario de tokens de Anthropic.
+- **todos:** un 429 que pide esperar más de 15 minutos (`QUOTA_RETRY_AFTER_SECONDS`): mejor aplazar que tener ocupado un hueco de revisión esperando. Por ejemplo, el límite diario de tokens de Anthropic.
 
 - **El tope de peticiones a la vez cierra un hueco:** sin él, un revisor comprometido lanzaría todas sus peticiones en paralelo antes de que se contara ningún token.
 - **Reenvío:**
@@ -451,7 +452,7 @@ Entre procesos, el desacople ya lo dan la cola, los ficheros montados y `@otter/
 |---|---|---|
 | `LlmProvider` (`reviewer/llm.ts`) | AI SDK | 3 proveedores |
 | `GitHubClient` (`worker/ports.ts`) | Octokit | Fake en tests del worker |
-| `ContainerRunner` (`worker/ports.ts`) | `docker run` | Frontera de seguridad; posible Podman o proxy del socket. Devuelve `unknown` y el núcleo lo valida |
+| `ContainerRunner` (`worker/ports.ts`) | HTTP al launcher (`launcherRunner`) | Frontera de seguridad. Devuelve `unknown` y el núcleo lo valida |
 
 - **Dependencias por argumentos** (`handleReview(deps, job)`), sin contenedor de inyección de dependencias.
 - **Postgres y git no llevan port:** solo tienen una implementación posible (Graphile ya obliga a usar Postgres).
@@ -480,6 +481,7 @@ Entre procesos, el desacople ya lo dan la cola, los ficheros montados y `@otter/
    - ✅ Endpoints admin, barrendero (con `git gc` de los mirrors), estado de la revisión y cuota de disco.
    - ✅ Reverse proxy (Caddy) en servidor: HTTPS y solo `/webhook` hacia fuera.
    - ✅ Estado de la revisión en la PR con un check run `code-otter` (el botón Re-run irá con los comandos `@otter`).
+   - ✅ Launcher: el socket de Docker sale del worker, que corre sin root; worktrees montados como subruta del volumen `otter-data`.
 
 ## 13. Pendiente de verificar
 
@@ -489,5 +491,7 @@ Entre procesos, el desacople ya lo dan la cola, los ficheros montados y `@otter/
   - **Contadores en memoria:** un reinicio del gateway pone a cero el presupuesto y el tope diario. Pasar a Postgres si hace falta un control de gasto exacto.
   - **El proveedor sigue recibiendo el código del PR,** por diseño: el gateway limita a quién se habla, no lo que se envía.
   - **La config del gateway sale del mismo `.env`:** quien pueda editarlo controla la clave y los topes.
-- **El socket de Docker en el worker equivale a ser root en el host** (decisión del plan 3: se deja y se documenta). Quien controla el worker puede crear contenedores que monten el disco del host. Un proxy del socket limita qué llamadas se hacen, pero no evita eso. La mitigación de verdad es un plan propio: Docker rootless, gVisor (`runsc`) o Podman sin root.
+- ~~El socket de Docker en el worker~~: lo tiene solo el launcher. Lo que queda:
+  - **Un worker comprometido conserva sus secretos:** la clave de la GitHub App (escribe en los repos instalados), la base de datos y `GATEWAY_SECRET` (gasta LLM hasta el tope diario). Pierde el host.
+  - **El launcher sigue siendo root en el host,** pero solo habla con el worker, no parsea nada de la revisión y fija todos los flags. Docker rootless, gVisor (`runsc`) o Podman sin root lo reducirían más.
 - **Reverse proxy sin rate limiting ni filtro por IP:** Caddy no trae rate limiting sin un plugin, y las IPs de GitHub (`/meta`) cambian. La firma HMAC ya autentica cada webhook y la api rechaza lo demás antes de tocar la BD.

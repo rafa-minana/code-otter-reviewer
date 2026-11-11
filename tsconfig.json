@@ -5,6 +5,7 @@
     { "path": "apps/api" },
     { "path": "apps/worker" },
     { "path": "apps/reviewer" },
-    { "path": "apps/gateway" }
+    { "path": "apps/gateway" },
+    { "path": "apps/launcher" }
   ]
 }

@@ -4,9 +4,9 @@ import { loadConfig } from "./config.js";
 
 const ENV = { DATABASE_URL: "postgres://x", GITHUB_APP_ID: "1", GITHUB_PRIVATE_KEY: "k", GATEWAY_SECRET: "s".repeat(32) };
 
-test("reviewers default to the internal network and the gateway", () => {
+test("reviewers default to the launcher and the gateway", () => {
   const { reviewer } = loadConfig(ENV);
-  assert.equal(reviewer.network, "otter-reviewers");
+  assert.equal(reviewer.launcherUrl, "http://otter-launcher:8090");
   assert.equal(reviewer.gatewayUrl, "http://otter-gateway:8080");
 });
 

@@ -1,104 +1,89 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import { request as httpRequest } from "node:http";
+import { relative } from "node:path";
 import { mintReviewToken } from "@otter/gateway/token.js";
-import type { ReviewerFailure } from "@otter/contracts";
+import {
+  REVIEW_CONTAINER_TIMEOUT_MS,
+  REVIEWER_LLM_ENV,
+  type LaunchRequest,
+  type LaunchResult,
+  type ReviewerFailure,
+} from "@otter/contracts";
 import type { ReviewerConfig } from "./config.js";
 import type { ContainerRunner } from "./ports.js";
 
-const execFileAsync = promisify(execFile);
-
-/** Mount point of the PR's checkout inside the container (read-only). */
-const REPO_MOUNT = "/repo";
-/** Each LLM call times out at 3 min; a review makes at most 6, partly in parallel. */
-const REVIEW_TIMEOUT_MS = 15 * 60_000;
-const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
+/** The launcher stops a review container on time; a minute more covers its answer. The call is silent until then. */
+const LAUNCH_TIMEOUT_MS = REVIEW_CONTAINER_TIMEOUT_MS + 60_000;
 const STDERR_TAIL_CHARS = 2_000;
 
-/**
- * The only variables the container gets, by name: Docker copies each value from the docker CLI's
- * environment (reviewerEnv), so none shows up in argv or `ps`. Never the whole environment: the
- * GitHub key and the database URL must not reach it. LLM_BASE_URL and LLM_API_KEY are always the
- * gateway's URL and this review's token: the real key lives only in the gateway.
- */
-export const REVIEWER_LLM_ENV = [
-  "LLM_PROVIDER",
-  "LLM_MODEL",
-  "LLM_API_KEY",
-  "LLM_BASE_URL",
-  "LLM_REASONING",
-];
-
-/** `docker run` for one review: no privileges, read-only filesystem, the checkout read-only, bounded resources. */
-export function dockerRunArgs(
-  cfg: ReviewerConfig,
-  worktree: string,
-  name: string,
-): string[] {
-  return [
-    "run",
-    "--rm",
-    "-i",
-    "--name",
-    name,
-    "--pull",
-    "never", // a same-named image from Docker Hub could be anyone's
-    "--network",
-    cfg.network,
-    "--read-only",
-    "--tmpfs",
-    "/tmp:rw,size=64m",
-    "--cap-drop",
-    "ALL",
-    "--security-opt",
-    "no-new-privileges",
-    "--pids-limit",
-    "256",
-    "--memory",
-    "1g",
-    "--cpus",
-    "1",
-    ...REVIEWER_LLM_ENV.flatMap((v) => ["-e", v]),
-    "-v",
-    `${worktree}:${REPO_MOUNT}:ro`,
-    cfg.image,
-  ];
-}
-
-/** Environment of the docker CLI for one review: the LLM settings, pointed at the gateway with a fresh token. */
+/** The container's LLM variables: the worker's settings, pointed at the gateway with a fresh token, never the real key. */
 export function reviewerEnv(
   cfg: ReviewerConfig,
   reviewId: string,
   base: NodeJS.ProcessEnv = process.env,
   now = Date.now(),
-): NodeJS.ProcessEnv {
-  return {
-    ...base,
-    LLM_BASE_URL: cfg.gatewayUrl,
-    LLM_API_KEY: mintReviewToken(cfg.gatewaySecret, reviewId, now),
-  };
+): LaunchRequest["env"] {
+  const env: LaunchRequest["env"] = {};
+  for (const name of REVIEWER_LLM_ENV)
+    if (typeof base[name] === "string") env[name] = base[name];
+  env.LLM_BASE_URL = cfg.gatewayUrl;
+  env.LLM_API_KEY = mintReviewToken(cfg.gatewaySecret, reviewId, now);
+  return env;
 }
 
-/** Runs the reviewer image through the Docker socket mounted in the worker. */
-export function dockerRunner(cfg: ReviewerConfig): ContainerRunner {
+/**
+ * Runs the reviewer through the launcher, the only service with the Docker socket. `dataDir` is the root
+ * of the data volume: the launcher gets the worktree relative to it.
+ */
+export function launcherRunner(
+  cfg: ReviewerConfig,
+  dataDir: string,
+): ContainerRunner {
   return {
     async runReviewer(request, worktree, reviewId) {
-      const name = `otter-review-${reviewId}`;
-      await removeContainer(name); // a leftover of a crashed attempt would clash on the name
-      const run = execFileAsync("docker", dockerRunArgs(cfg, worktree, name), {
+      const result = await launch(cfg.launcherUrl, {
+        reviewId,
+        worktree: relative(dataDir, worktree),
         env: reviewerEnv(cfg, reviewId),
-        timeout: REVIEW_TIMEOUT_MS,
-        maxBuffer: MAX_OUTPUT_BYTES,
+        request,
       });
-      run.child.stdin?.end(JSON.stringify(request));
+      if (result.exitCode !== 0) throw reviewerError(result);
       try {
-        const { stdout } = await run;
-        return JSON.parse(stdout);
-      } catch (err) {
-        await removeContainer(name); // on timeout the CLI dies but the container may live on
-        throw reviewerError(err);
+        return JSON.parse(result.stdout);
+      } catch {
+        throw new ReviewerError("reviewer container printed no JSON", undefined);
       }
     },
   };
+}
+
+/** node:http, not fetch: undici gives up on a response after 300 s, and a review lasts much longer. */
+function launch(url: string, body: LaunchRequest): Promise<LaunchResult> {
+  return new Promise((resolve, reject) => {
+    // no exit code: the worker retries it like a timeout (busy launcher, restart in progress)
+    const fail = (why: string) =>
+      reject(new ReviewerError(`reviewer launcher failed: ${why}`, undefined));
+    const req = httpRequest(
+      `${url}/review`,
+      { method: "POST", headers: { "content-type": "application/json" }, timeout: LAUNCH_TIMEOUT_MS },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (c: Buffer) => chunks.push(c));
+        res.on("error", (e) => fail(e.message));
+        res.on("end", () => {
+          const text = Buffer.concat(chunks).toString("utf8");
+          if (res.statusCode !== 200) return fail(`HTTP ${res.statusCode}: ${text.slice(0, 500)}`);
+          try {
+            resolve(JSON.parse(text) as LaunchResult);
+          } catch {
+            fail("unreadable answer");
+          }
+        });
+      },
+    );
+    req.on("timeout", () => req.destroy(new Error("timed out")));
+    req.on("error", (e) => fail(e.message));
+    req.end(JSON.stringify(body));
+  });
 }
 
 /**
@@ -116,25 +101,18 @@ export class ReviewerError extends Error {
   }
 }
 
-/** From execFile's error: the container's exit code (`docker run` passes it through), its stderr tail and its ReviewerFailure. */
-export function reviewerError(err: unknown): ReviewerError {
-  const { code, stdout, stderr, message } = err as {
-    code?: unknown;
-    stdout?: string;
-    stderr?: string;
-    message: string;
-  };
-  const detail = (stderr || message).trim().slice(-STDERR_TAIL_CHARS);
+/** From the launcher's result: the container's exit code, its stderr tail and its ReviewerFailure. */
+export function reviewerError({ exitCode, stdout, stderr }: LaunchResult): ReviewerError {
   return new ReviewerError(
-    `reviewer container failed (exit ${code ?? "?"}): ${detail}`,
-    typeof code === "number" ? code : undefined, // a timeout or a full buffer has no exit code
+    `reviewer container failed (exit ${exitCode ?? "?"}): ${stderr.trim().slice(-STDERR_TAIL_CHARS)}`,
+    exitCode ?? undefined, // a timeout or a full buffer has no exit code
     retryAfterOf(stdout),
   );
 }
 
-function retryAfterOf(stdout: string | undefined): number | undefined {
+function retryAfterOf(stdout: string): number | undefined {
   try {
-    const { retryAfterSeconds } = JSON.parse(stdout ?? "") as ReviewerFailure;
+    const { retryAfterSeconds } = JSON.parse(stdout) as ReviewerFailure;
     return typeof retryAfterSeconds === "number" && retryAfterSeconds > 0
       ? retryAfterSeconds
       : undefined;
@@ -142,40 +120,3 @@ function retryAfterOf(stdout: string | undefined): number | undefined {
     return undefined;
   }
 }
-
-/** Fails at startup, with the fix, when the reviewer image hasn't been built. */
-export async function ensureReviewerImage(cfg: ReviewerConfig): Promise<void> {
-  try {
-    await execFileAsync("docker", ["image", "inspect", cfg.image]);
-  } catch {
-    throw new Error(
-      `reviewer image "${cfg.image}" not found: run \`docker compose build reviewer\``,
-    );
-  }
-}
-
-/**
- * Fails closed at startup: reviewers must sit on an internal network (no internet, only the gateway).
- * A typo or `bridge` here would quietly give untrusted code a way out, so the worker refuses to start.
- */
-export async function ensureReviewerNetwork(
-  cfg: ReviewerConfig,
-): Promise<void> {
-  const internal = await execFileAsync("docker", [
-    "network",
-    "inspect",
-    "-f",
-    "{{.Internal}}",
-    cfg.network,
-  ])
-    .then(({ stdout }) => stdout.trim() === "true")
-    .catch(() => false);
-  if (!internal) {
-    throw new Error(
-      `reviewer network "${cfg.network}" must exist and be internal: start the stack with \`docker compose up\`, which creates it`,
-    );
-  }
-}
-
-const removeContainer = (name: string) =>
-  execFileAsync("docker", ["rm", "-f", name]).catch(() => {});

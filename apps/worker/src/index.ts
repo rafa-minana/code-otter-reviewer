@@ -6,11 +6,7 @@ import { handleCleanup } from "./cleanup.js";
 import { loadConfig } from "./config.js";
 import { octokitClient } from "./github.js";
 import { handleJanitor } from "./janitor.js";
-import {
-  dockerRunner,
-  ensureReviewerImage,
-  ensureReviewerNetwork,
-} from "./runner.js";
+import { launcherRunner } from "./runner.js";
 import { handleReview } from "./review.js";
 
 /** Check run updates are a few GitHub calls each: two at a time is plenty. */
@@ -19,11 +15,9 @@ const CHECKS_CONCURRENCY = 2;
 const config = loadConfig(process.env);
 // The LLM runs in the reviewer container; validating its settings here makes a typo fail at startup.
 createLlm(process.env);
-await ensureReviewerImage(config.reviewer);
-await ensureReviewerNetwork(config.reviewer);
 const deps = {
   gh: octokitClient(config),
-  runner: dockerRunner(config.reviewer),
+  runner: launcherRunner(config.reviewer, config.git.dataDir),
   git: config.git,
   maxStorageBytes: config.maxStorageBytes,
   repoIdleDays: config.repoIdleDays,

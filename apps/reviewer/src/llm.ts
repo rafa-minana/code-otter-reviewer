@@ -11,12 +11,11 @@ import {
   type LanguageModel,
   type ToolSet,
 } from "ai";
-import { LLM_PROVIDERS, type LlmProviderName } from "@otter/contracts";
+import { LLM_CALL_TIMEOUT_MS, LLM_PROVIDERS, type LlmProviderName } from "@otter/contracts";
 import type { z } from "zod";
 import {
   LLM_REASONING_LEVELS,
   LLM_TIMEOUT_MS,
-  LLM_TOTAL_TIMEOUT_MS,
   TOOL_MAX_STEPS,
 } from "./constants.js";
 
@@ -76,7 +75,7 @@ export function createLlm(
   const common = {
     model,
     reasoning,
-    timeout: { stepMs: LLM_TIMEOUT_MS, totalMs: LLM_TOTAL_TIMEOUT_MS },
+    timeout: { stepMs: LLM_TIMEOUT_MS, totalMs: LLM_CALL_TIMEOUT_MS },
   };
 
   return {
